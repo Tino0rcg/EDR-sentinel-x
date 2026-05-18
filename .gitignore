@@ -1,0 +1,19 @@
+# Environment files
+server/.env
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Node/React
+dashboard/node_modules/
+dashboard/dist/
+dashboard/.env*
+
+# Temporary files
+agent/build/
+agent/SentinelAgent.spec
