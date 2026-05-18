@@ -124,35 +124,37 @@ def analyze_predictions(hostname: str):
         db.close()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    db = SessionLocal()
     try:
-        from sqlalchemy import text
-        db.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR DEFAULT 'USER'"))
-        db.commit()
-    except:
-        db.rollback()
-    try:
-        from sqlalchemy import text
-        db.execute(text("ALTER TABLE devices ADD COLUMN quarantine INTEGER DEFAULT 0"))
-        db.commit()
-    except:
-        db.rollback()
-    try:
-        from sqlalchemy import text
-        db.execute(text("ALTER TABLE devices ADD COLUMN active_connections JSON"))
-        db.commit()
-    except:
-        db.rollback()
-    if db.query(UserDB).count() == 0:
-        h = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
-        db.add(UserDB(email="admin@sentinel.com", hashed_password=h, role="ADMIN")); db.commit()
-    else:
-        admin = db.query(UserDB).filter(UserDB.email == "admin@sentinel.com").first()
-        if admin and admin.role != "ADMIN":
-            admin.role = "ADMIN"
+        db = SessionLocal()
+        try:
+            from sqlalchemy import text
+            db.execute(text("ALTER TABLE users ADD COLUMN role VARCHAR DEFAULT 'USER'"))
             db.commit()
-            
-    db.close()
+        except:
+            db.rollback()
+        try:
+            from sqlalchemy import text
+            db.execute(text("ALTER TABLE devices ADD COLUMN quarantine INTEGER DEFAULT 0"))
+            db.commit()
+        except:
+            db.rollback()
+        try:
+            from sqlalchemy import text
+            db.execute(text("ALTER TABLE devices ADD COLUMN active_connections JSON"))
+            db.commit()
+        except:
+            db.rollback()
+        if db.query(UserDB).count() == 0:
+            h = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
+            db.add(UserDB(email="admin@sentinel.com", hashed_password=h, role="ADMIN")); db.commit()
+        else:
+            admin = db.query(UserDB).filter(UserDB.email == "admin@sentinel.com").first()
+            if admin and admin.role != "ADMIN":
+                admin.role = "ADMIN"
+                db.commit()
+        db.close()
+    except Exception as e:
+        print(f"⚠️ Error durante las migraciones de inicio: {e}")
     yield
 
 app = FastAPI(lifespan=lifespan)
