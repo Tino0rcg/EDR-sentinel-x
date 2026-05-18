@@ -21,6 +21,13 @@ SQLALCHEMY_DATABASE_URL = os.environ.get("DATABASE_URL", "sqlite:///./sentinel.d
 if SQLALCHEMY_DATABASE_URL.startswith("postgres://"):
     SQLALCHEMY_DATABASE_URL = SQLALCHEMY_DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
+# Auto-inyectar sslmode=require para conexiones seguras en la nube (como Supabase)
+if SQLALCHEMY_DATABASE_URL.startswith("postgresql://") and "sslmode" not in SQLALCHEMY_DATABASE_URL:
+    if "?" in SQLALCHEMY_DATABASE_URL:
+        SQLALCHEMY_DATABASE_URL += "&sslmode=require"
+    else:
+        SQLALCHEMY_DATABASE_URL += "?sslmode=require"
+
 if "sqlite" in SQLALCHEMY_DATABASE_URL:
     engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
 else:
@@ -55,7 +62,11 @@ class AlertDB(Base):
     __tablename__ = "alerts"
     id = Column(Integer, primary_key=True); hostname = Column(String); message = Column(String); level = Column(String); timestamp = Column(Float)
 
-Base.metadata.create_all(bind=engine)
+try:
+    Base.metadata.create_all(bind=engine)
+    print("✅ Base de datos inicializada correctamente.")
+except Exception as db_err:
+    print(f"❌ Error al inicializar la base de datos: {db_err}")
 
 def send_email_task(subject, body, urgent=False):
     if not ENABLE_EMAILS: return
