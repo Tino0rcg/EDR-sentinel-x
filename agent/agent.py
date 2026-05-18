@@ -16,11 +16,17 @@ DEFAULT_IP = "localhost"
 
 if os.path.exists(CONFIG_FILE):
     with open(CONFIG_FILE, "r") as f:
-        SERVER_IP = f.read().strip()
+        config_val = f.read().strip()
 else:
-    SERVER_IP = DEFAULT_IP
+    config_val = DEFAULT_IP
 
-SERVER_URL = f"http://{SERVER_IP}:8000/metrics"
+# Detectar inteligentemente si config.txt tiene una URL completa (para producción en Render) o local
+if config_val.startswith("http://") or config_val.startswith("https://"):
+    if config_val.endswith("/"):
+        config_val = config_val[:-1]
+    SERVER_URL = config_val if config_val.endswith("/metrics") else f"{config_val}/metrics"
+else:
+    SERVER_URL = f"http://{config_val}:8000/metrics"
 CPU_CORES = psutil.cpu_count() or 1
 
 def run_cmd(cmd):
