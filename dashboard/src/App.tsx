@@ -96,7 +96,7 @@ const App = () => {
     <div className="h-screen w-full text-white flex bg-[#010102] font-sans overflow-hidden">
       {/* LATERAL IZQUIERDA */}
       <aside className="w-64 bg-black/40 border-r border-white/5 p-6 flex flex-col z-20">
-        <div className="flex flex-col items-center gap-3 mb-10 text-blue-500 font-black italic text-2xl tracking-tighter"><img src="https://raw.githubusercontent.com/Tino0rcg/sentinel/main/ChatGPT%20Image%2014%20may%202026%2C%2011_28_18%20p.m..png" alt="Sentinel Logo" className="h-24 mix-blend-screen [mask-image:radial-gradient(circle,white_35%,transparent_75%)]" /> SENTINEL-X</div>
+        <div className="flex flex-col items-center gap-3 mb-10 text-blue-500 font-black italic text-2xl tracking-tighter"><img src="https://raw.githubusercontent.com/Tino0rcg/sentinel/main/ChatGPT%20Image%2014%20may%202026%2C%2011_28_18%20p.m..png" alt="Sentinel Logo" className="h-24 mix-blend-screen" style={{ WebkitMaskImage: 'radial-gradient(circle, white 35%, transparent 75%)', maskImage: 'radial-gradient(circle, white 35%, transparent 75%)' }} /> SENTINEL-X</div>
         <nav className="space-y-1 mb-8">
           <NavItem icon={<Globe size={18}/>} label="Vista Global" active={view === 'global'} onClick={() => { setView('global'); setSelectedDevice(null); }} />
           <NavItem icon={<LayoutDashboard size={18}/>} label="Dashboard" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
@@ -384,7 +384,7 @@ const Landing = ({ onLoginClick }: any) => (
     <div className="absolute inset-0 bg-[linear-gradient(to_right,#ffffff0a_1px,transparent_1px),linear-gradient(to_bottom,#ffffff0a_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)]"></div>
 
     <div className="absolute top-10 left-10 flex items-center gap-4 z-50">
-        <img src="https://raw.githubusercontent.com/Tino0rcg/sentinel/main/ChatGPT%20Image%2014%20may%202026%2C%2011_28_18%20p.m..png" alt="Sentinel Logo" className="h-20 md:h-28 mix-blend-screen [mask-image:radial-gradient(circle,white_35%,transparent_75%)] hover:scale-105 transition-transform" />
+        <img src="https://raw.githubusercontent.com/Tino0rcg/sentinel/main/ChatGPT%20Image%2014%20may%202026%2C%2011_28_18%20p.m..png" alt="Sentinel Logo" className="h-20 md:h-28 mix-blend-screen hover:scale-105 transition-transform" style={{ WebkitMaskImage: 'radial-gradient(circle, white 35%, transparent 75%)', maskImage: 'radial-gradient(circle, white 35%, transparent 75%)' }} />
         <span className="text-white font-black italic tracking-tighter text-3xl">SENTINEL-X</span>
     </div>
 
@@ -479,7 +479,8 @@ const Login = ({ onLogin, onBack }: any) => {
               <img 
                 src="https://raw.githubusercontent.com/Tino0rcg/sentinel/main/ChatGPT%20Image%2014%20may%202026%2C%2011_28_18%20p.m..png" 
                 alt="Sentinel Logo" 
-                className="h-64 mx-auto mb-12 drop-shadow-[0_0_50px_rgba(59,130,246,0.2)] mix-blend-screen [mask-image:radial-gradient(circle,white_35%,transparent_75%)]" 
+                className="h-64 mx-auto mb-12 drop-shadow-[0_0_50px_rgba(59,130,246,0.2)] mix-blend-screen" 
+                style={{ WebkitMaskImage: 'radial-gradient(circle, white 35%, transparent 75%)', maskImage: 'radial-gradient(circle, white 35%, transparent 75%)' }}
               />
               <h2 className="text-5xl font-black tracking-tighter italic text-white mb-4">SENTINEL-X</h2>
               <div className="h-1 w-24 bg-blue-600 mx-auto rounded-full mb-8"></div>
