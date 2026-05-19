@@ -26,7 +26,7 @@ const App = () => {
 
   const safeFetch = async (url: string) => { try { const res = await fetch(url); return res.ok ? await res.json() : null; } catch (e) { return null; } };
   const fetchAlerts = async () => { const d = await safeFetch(`${API_URL}/alerts`); if (d) setAlerts(d); };
-  const fetchDevices = async () => { const d = await safeFetch(`${API_URL}/devices`); if (Array.isArray(d)) { setDevices(d); if (d.length > 0 && !selectedDevice) setSelectedDevice(d[0].hostname); } };
+  const fetchDevices = async () => { const d = await safeFetch(`${API_URL}/devices`); if (Array.isArray(d)) { setDevices(d); } };
   
   const fetchMetrics = async () => {
     if (!isAuthenticated || !selectedDevice) return;
@@ -54,6 +54,11 @@ const App = () => {
   };
 
   useEffect(() => { if (isAuthenticated) { fetchDevices(); fetchAlerts(); const i = setInterval(() => { fetchDevices(); fetchAlerts(); }, 3000); return () => clearInterval(i); } }, [isAuthenticated]);
+  useEffect(() => {
+    if (devices.length > 0 && !selectedDevice) {
+      setSelectedDevice(devices[0].hostname);
+    }
+  }, [devices, selectedDevice]);
   useEffect(() => { if (isAuthenticated && selectedDevice) { fetchMetrics(); const i = setInterval(fetchMetrics, 2000); return () => clearInterval(i); } }, [selectedDevice, isAuthenticated]);
 
   const latest = metrics.length > 0 ? metrics[metrics.length - 1] : null;
