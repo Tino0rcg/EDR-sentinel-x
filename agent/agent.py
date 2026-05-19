@@ -9,10 +9,22 @@ import platform
 import ctypes
 import sys
 
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+except:
+    pass
+
 # --- CONFIGURACIÓN ---
 INTERVAL = 5 
-CONFIG_FILE = "config.txt"
 DEFAULT_IP = "localhost"
+
+if getattr(sys, 'frozen', False):
+    exe_dir = os.path.dirname(sys.executable)
+else:
+    exe_dir = os.path.dirname(os.path.abspath(__file__))
+
+CONFIG_FILE = os.path.join(exe_dir, "config.txt")
 
 if os.path.exists(CONFIG_FILE):
     with open(CONFIG_FILE, "r") as f:
@@ -33,10 +45,10 @@ def run_cmd(cmd):
     try: 
         res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         if res.returncode != 0:
-            print(f"❌ Error ejecutando comando: {res.stderr.strip()}")
+            print(f"[ERROR] ejecutando comando: {res.stderr.strip()}")
         return res.stdout.strip()
     except Exception as e: 
-        print(f"❌ Excepción: {e}")
+        print(f"[EXCEPCION]: {e}")
         return ""
 
 def is_admin():
@@ -211,14 +223,57 @@ def get_metrics():
         print(f"Error: {e}")
         return None
 
+def check_and_install_persistence():
+    # Solo instalar persistencia en produccion si es ejecutable
+    if not getattr(sys, 'frozen', False):
+        return
+    
+    current_exe = sys.executable
+    appdata = os.getenv("LOCALAPPDATA")
+    target_dir = os.path.join(appdata, "SentinelAgent")
+    target_exe = os.path.join(target_dir, "SentinelAgent.exe")
+    
+    if os.path.abspath(current_exe).lower() != os.path.abspath(target_exe).lower():
+        try:
+            if not os.path.exists(target_dir):
+                os.makedirs(target_dir)
+            
+            import shutil
+            # Copiar ejecutable
+            shutil.copy2(current_exe, target_exe)
+            
+            # Copiar config.txt
+            config_source = os.path.join(os.path.dirname(current_exe), "config.txt")
+            config_target = os.path.join(target_dir, "config.txt")
+            if os.path.exists(config_source):
+                shutil.copy2(config_source, config_target)
+            else:
+                with open(config_target, "w") as f:
+                    f.write("https://edr-sentinel-x.onrender.com")
+            
+            # Registrar inicio automático en Windows Registry (Run)
+            import winreg as reg
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            key = reg.OpenKey(reg.HKEY_CURRENT_USER, key_path, 0, reg.KEY_SET_VALUE)
+            reg.SetValueEx(key, "SentinelAgent", 0, reg.REG_SZ, f'"{target_exe}"')
+            reg.CloseKey(key)
+            
+            # Lanzar el proceso persistente y cerrar el actual
+            os.startfile(target_exe)
+            sys.exit(0)
+        except Exception as e:
+            print(f"[-] Error registrando persistencia: {e}")
+
 def main():
     print(f"--- Sentinel Master Agent v4.8 ---")
     if not is_admin():
-        print("🚀 Solicitando permisos de ADMINISTRADOR...")
+        print("[*] Solicitando permisos de ADMINISTRADOR...")
         ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
         sys.exit()
     
-    print("✅ Agente ejecutándose con privilegios de ADMINISTRADOR.")
+    # Auto instalar en inicio en segundo plano al ejecutar por primera vez
+    check_and_install_persistence()
+    print("[+] Agente ejecutándose con privilegios de ADMINISTRADOR.")
     while True:
         try:
             data = get_metrics()
