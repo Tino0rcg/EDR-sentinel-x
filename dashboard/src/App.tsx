@@ -163,7 +163,7 @@ const App = () => {
 
             {view === 'global' ? (
                <div className="space-y-8">
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                       <div className="bg-white/5 p-6 rounded-[32px] border border-white/5 text-center shadow-lg">
                           <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-2">Equipos Totales</p>
                           <div className="text-4xl font-black">{devices.length}</div>
@@ -171,6 +171,10 @@ const App = () => {
                       <div className="bg-white/5 p-6 rounded-[32px] border border-white/5 text-center shadow-lg">
                           <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-2 text-green-500">En Línea</p>
                           <div className="text-4xl font-black text-green-500">{devices.filter(d => d.status === 'ONLINE').length}</div>
+                      </div>
+                      <div className="bg-white/5 p-6 rounded-[32px] border border-white/5 text-center shadow-lg">
+                          <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-2 text-red-500">Inactivos</p>
+                          <div className="text-4xl font-black text-red-500">{devices.filter(d => d.status === 'OFFLINE').length}</div>
                       </div>
                       <div className="bg-white/5 p-6 rounded-[32px] border border-white/5 text-center shadow-lg">
                           <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-2 text-orange-500">Alertas Predictivas</p>
