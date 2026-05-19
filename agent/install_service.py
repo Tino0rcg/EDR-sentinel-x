@@ -9,7 +9,14 @@ def install_service():
     if getattr(sys, 'frozen', False):
         exe_path = sys.executable
     else:
-        exe_path = os.path.join(os.getcwd(), "dist", "agent.exe")
+        cwd_exe = os.path.join(os.getcwd(), "SentinelAgent_V2.exe")
+        dist_exe = os.path.join(os.getcwd(), "dist", "SentinelAgent.exe")
+        if os.path.exists(cwd_exe):
+            exe_path = cwd_exe
+        elif os.path.exists(dist_exe):
+            exe_path = dist_exe
+        else:
+            exe_path = os.path.join(os.getcwd(), "dist", "agent.exe")
 
     if not os.path.exists(exe_path):
         print(f"❌ Error: No se encontró el ejecutable en {exe_path}")
