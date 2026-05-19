@@ -5,7 +5,9 @@ import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 interface Device { hostname: string; last_seen: string; status: 'ONLINE' | 'OFFLINE'; active_connections?: string[]; }
 interface Metric { hostname: string; cpu_usage: number; ram_usage: number; disk_usage: number; uptime: string; network: any; processes: any[]; security_alerts: any[]; active_connections: string[]; timestamp: number; }
 
-const API_URL = import.meta.env.VITE_API_URL || (typeof window !== 'undefined' && window.location.hostname.includes('vercel.app') ? 'https://edr-sentinel-x.onrender.com' : 'http://localhost:8000');
+const API_URL = (import.meta.env.VITE_API_URL && !import.meta.env.VITE_API_URL.includes('dashboard.render.com'))
+  ? import.meta.env.VITE_API_URL
+  : (typeof window !== 'undefined' && window.location.hostname.includes('vercel.app') ? 'https://edr-sentinel-x.onrender.com' : 'http://localhost:8000');
 
 const App = () => {
   const [metrics, setMetrics] = useState<Metric[]>([]);
