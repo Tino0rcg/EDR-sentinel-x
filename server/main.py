@@ -228,7 +228,21 @@ def clear_alerts():
 
 @app.get("/devices")
 def get_devices():
-    db = SessionLocal(); data = db.query(DeviceDB).all(); db.close(); return data
+    db = SessionLocal()
+    devices = db.query(DeviceDB).all()
+    now = datetime.datetime.utcnow()
+    updated = False
+    for d in devices:
+        if d.last_seen and (now - d.last_seen).total_seconds() > 15:
+            if d.status != "OFFLINE":
+                d.status = "OFFLINE"
+                updated = True
+    if updated:
+        db.commit()
+    # Volver a cargar para retornar datos actualizados
+    data = db.query(DeviceDB).all()
+    db.close()
+    return data
 
 @app.post("/quarantine/{hostname}")
 def toggle_quarantine(hostname: str, data: Dict[str, Any]):
