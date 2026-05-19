@@ -60,8 +60,9 @@ def is_admin():
 KNOWN_USBS = set()
 try:
     for p in psutil.disk_partitions(all=False):
-        if 'cdrom' not in p.opts:
-            KNOWN_USBS.add(p.device)
+        if 'cdrom' not in p.opts and p.device and len(p.device) >= 2 and p.device[1] == ':':
+            drive = p.device[0].upper() + ":"
+            KNOWN_USBS.add(drive)
 except: pass
 
 CURRENT_QUARANTINE = False
@@ -111,8 +112,9 @@ def check_advanced_threats(conns_list):
     try:
         current_usbs = set()
         for p in psutil.disk_partitions(all=False):
-            if 'cdrom' not in p.opts:
-                current_usbs.add(p.device)
+            if 'cdrom' not in p.opts and p.device and len(p.device) >= 2 and p.device[1] == ':':
+                drive = p.device[0].upper() + ":"
+                current_usbs.add(drive)
                 
         new_usbs = current_usbs - KNOWN_USBS
         for u in new_usbs:
