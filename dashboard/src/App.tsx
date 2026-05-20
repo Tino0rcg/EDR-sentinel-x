@@ -309,8 +309,14 @@ const App = () => {
                          )}
                          </div>
                      </div>
-                     <div className="bg-white/5 border border-white/5 rounded-[40px] p-8">
-                         <h3 className="text-xs font-black opacity-30 mb-6 uppercase flex items-center gap-2"><Globe size={14}/> Conexiones Red</h3>
+                      <div className="bg-white/5 border border-white/5 rounded-[40px] p-8">
+                          <div className="flex justify-between items-center mb-6">
+                              <h3 className="text-xs font-black opacity-30 uppercase flex items-center gap-2"><Globe size={14}/> Conexiones Red</h3>
+                              <div className="flex gap-4 text-[10px] font-black">
+                                  <span className="flex items-center gap-1 text-blue-400"><ArrowUp size={12}/> {inventory.upload_speed || '0 KB/s'}</span>
+                                  <span className="flex items-center gap-1 text-purple-400"><ArrowDown size={12}/> {inventory.download_speed || '0 KB/s'}</span>
+                              </div>
+                          </div>
                          <div className="space-y-2">{(expandedConns ? currentDeviceObj?.active_connections : currentDeviceObj?.active_connections?.slice(0, 5))?.map((conn:string, i:number) => (
                             <div key={i} className="p-4 bg-white/5 rounded-2xl border border-white/5 text-[10px] font-black text-white/40">{conn}</div>
                          ))}
@@ -340,6 +346,8 @@ const App = () => {
               <AuditItem label="Memoria Instalada" value={inventory.ram_total} icon={<Database size={16}/>} />
               <AuditItem label="Almacenamiento (Disco)" value={inventory.disk_total || 'N/A'} icon={<HardDrive size={16}/>} />
               <AuditItem label="Estado Batería" value={inventory.battery !== 'N/A' ? `${inventory.battery}%` : 'Desktop / AC'} icon={<Battery size={16}/>} />
+              <AuditItem label="Ancho de Banda (Subida)" value={inventory.upload_speed || '0.0 KB/s'} icon={<ArrowUp size={16} className="text-blue-400"/>} />
+              <AuditItem label="Ancho de Banda (Bajada)" value={inventory.download_speed || '0.0 KB/s'} icon={<ArrowDown size={16} className="text-purple-400"/>} />
               
               <div className="pt-10 border-t border-white/5">
                  <p className="text-[10px] font-black opacity-20 mb-6 uppercase">Escudos Activos</p>

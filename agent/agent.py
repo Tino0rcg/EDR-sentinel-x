@@ -8,6 +8,7 @@ import subprocess
 import platform
 import ctypes
 import sys
+import threading
 
 try:
     if hasattr(sys.stdout, 'reconfigure'):
@@ -39,14 +40,26 @@ if config_val.startswith("http://") or config_val.startswith("https://"):
     SERVER_URL = config_val if config_val.endswith("/metrics") else f"{config_val}/metrics"
 else:
     SERVER_URL = f"http://{config_val}:8000/metrics"
+
+import urllib.parse
+try:
+    parsed_url = urllib.parse.urlparse(SERVER_URL)
+    server_hostname = parsed_url.hostname or "127.0.0.1"
+    SERVER_IP = socket.gethostbyname(server_hostname)
+except Exception:
+    SERVER_IP = "127.0.0.1"
+
 CPU_CORES = psutil.cpu_count() or 1
 
 def run_cmd(cmd):
     try: 
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
         if res.returncode != 0:
             print(f"[ERROR] ejecutando comando: {res.stderr.strip()}")
         return res.stdout.strip()
+    except subprocess.TimeoutExpired:
+        print(f"[ERROR] Comando expiro por limite de tiempo (10s): {cmd}")
+        return ""
     except Exception as e: 
         print(f"[EXCEPCION]: {e}")
         return ""
@@ -57,7 +70,18 @@ def is_admin():
     except:
         return False
 
+def check_single_instance():
+    mutex_name = "Local\\SentinelAgentMutex_Unique_12345"
+    kernel32 = ctypes.windll.kernel32
+    mutex = kernel32.CreateMutexW(None, True, mutex_name)
+    last_error = kernel32.GetLastError()
+    if last_error == 183:  # ERROR_ALREADY_EXISTS
+        print("[-] Otra instancia del agente ya está en ejecución. Saliendo...")
+        sys.exit(0)
+    return mutex
+
 KNOWN_USBS = set()
+LAST_NET_IO = None
 try:
     for p in psutil.disk_partitions(all=False):
         if 'cdrom' not in p.opts and p.device and len(p.device) >= 2 and p.device[1] == ':':
@@ -67,20 +91,55 @@ except: pass
 
 CURRENT_QUARANTINE = False
 
+def mostrar_mensaje_cuarentena():
+    try:
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "ATENCIÓN:\n\nEste equipo ha sido aislado temporalmente de la red por el sistema de seguridad Sentinel debido a una amenaza crítica detectada.\n\nPor favor, contacte con soporte si el problema persiste.",
+            "Sentinel EDR - Alerta de Seguridad",
+            0x10 | 0x0
+        )
+    except:
+        pass
+
 def handle_quarantine(enable):
     global CURRENT_QUARANTINE
     if enable == CURRENT_QUARANTINE: return
     
     if enable:
         print("🚨 INICIANDO CUARENTENA DE RED...")
-        run_cmd(f'powershell -Command "New-NetFirewallRule -DisplayName \'SentinelBlockAll\' -Direction Outbound -Action Block; New-NetFirewallRule -DisplayName \'SentinelBlockAllIn\' -Direction Inbound -Action Block; New-NetFirewallRule -DisplayName \'SentinelAllowServer\' -Direction Outbound -RemoteAddress {SERVER_IP} -Action Allow; New-NetFirewallRule -DisplayName \'SentinelAllowServerIn\' -Direction Inbound -RemoteAddress {SERVER_IP} -Action Allow"')
+        
+        # Mostrar alerta visual en un hilo separado de forma asíncrona
+        threading.Thread(target=mostrar_mensaje_cuarentena, daemon=True).start()
+        
+        import socket
+        import urllib.parse
+        try:
+            parsed_url = urllib.parse.urlparse(SERVER_URL)
+            server_hostname = parsed_url.hostname or "127.0.0.1"
+            current_server_ip = socket.gethostbyname(server_hostname)
+        except Exception:
+            current_server_ip = SERVER_IP
+            
+        # 1. Asegurar que el Firewall esté habilitado y bloquear todo por defecto (Entrante y Saliente)
+        run_cmd('powershell -Command "Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True -OutboundConnections Block -InboundConnections Block"')
+        
+        # 2. Crear reglas temporales de Permitir para el Servidor y DNS (para seguir comunicando con la consola)
+        run_cmd(f'powershell -Command "New-NetFirewallRule -DisplayName \'SentinelAllowServer\' -Direction Outbound -RemoteAddress {current_server_ip} -Action Allow"')
+        run_cmd(f'powershell -Command "New-NetFirewallRule -DisplayName \'SentinelAllowServerIn\' -Direction Inbound -RemoteAddress {current_server_ip} -Action Allow"')
+        run_cmd('powershell -Command "New-NetFirewallRule -DisplayName \'SentinelAllowDNS\' -Direction Outbound -Protocol UDP -RemotePort 53 -Action Allow"')
+        run_cmd('powershell -Command "New-NetFirewallRule -DisplayName \'SentinelAllowDNSTCP\' -Direction Outbound -Protocol TCP -RemotePort 53 -Action Allow"')
     else:
         print("✅ LEVANTANDO CUARENTENA...")
-        run_cmd('powershell -Command "Remove-NetFirewallRule -DisplayName \'SentinelBlockAll\'; Remove-NetFirewallRule -DisplayName \'SentinelBlockAllIn\'; Remove-NetFirewallRule -DisplayName \'SentinelAllowServer\'; Remove-NetFirewallRule -DisplayName \'SentinelAllowServerIn\'"')
+        # 1. Restaurar comportamiento por defecto (Permitir conexiones salientes e inbound por defecto)
+        run_cmd('powershell -Command "Set-NetFirewallProfile -Profile Domain,Private,Public -OutboundConnections Allow -InboundConnections NotConfigured"')
+        
+        # 2. Limpiar reglas temporales
+        run_cmd('powershell -Command "Remove-NetFirewallRule -DisplayName \'SentinelAllowServer\'; Remove-NetFirewallRule -DisplayName \'SentinelAllowServerIn\'; Remove-NetFirewallRule -DisplayName \'SentinelAllowDNS\'; Remove-NetFirewallRule -DisplayName \'SentinelAllowDNSTCP\'"')
     
     CURRENT_QUARANTINE = enable
 
-def check_advanced_threats(conns_list):
+def check_advanced_threats(conns_list, upload_speed, download_speed):
     new_alerts = []
     
     # 1. Threat Intel (Suspicious Ports)
@@ -126,6 +185,14 @@ def check_advanced_threats(conns_list):
             new_alerts.append({"level": "WARNING", "desc": f"ALMACENAMIENTO EXTRAÍDO: Disco/USB desconectado ({u})"})
             KNOWN_USBS.remove(u)
     except: pass
+
+    # 5. Network Bandwidth Monitor (Subida/Bajada inusual para exfiltración o minería)
+    # Umbral de subida: 15 MB/s (15360 KB/s)
+    # Umbral de bajada: 30 MB/s (30720 KB/s)
+    if upload_speed > 15360:
+        new_alerts.append({"level": "CRITICAL", "desc": f"TRÁFICO INUSUAL (SUBIDA): Transmitiendo a {round(upload_speed/1024, 2)} MB/s. Posible exfiltración o malware."})
+    if download_speed > 30720:
+        new_alerts.append({"level": "WARNING", "desc": f"TRÁFICO INUSUAL (BAJADA): Descargando a {round(download_speed/1024, 2)} MB/s. Alto consumo de red."})
 
     return new_alerts
 
@@ -187,8 +254,28 @@ def get_top_processes():
     return sorted(processes, key=lambda x: x['cpu'], reverse=True)[:5]
 
 def get_metrics():
+    global LAST_NET_IO
     try:
+        # Calcular velocidad de subida/bajada de red
+        upload_speed = 0.0 # KB/s
+        download_speed = 0.0 # KB/s
+        try:
+            current_io = psutil.net_io_counters()
+            current_time = time.time()
+            if LAST_NET_IO is not None:
+                last_sent, last_recv, last_time = LAST_NET_IO
+                time_diff = current_time - last_time
+                if time_diff > 0:
+                    upload_speed = round(((current_io.bytes_sent - last_sent) / 1024) / time_diff, 2)
+                    download_speed = round(((current_io.bytes_recv - last_recv) / 1024) / time_diff, 2)
+            LAST_NET_IO = (current_io.bytes_sent, current_io.bytes_recv, current_time)
+        except Exception as e:
+            print(f"Error midiendo red: {e}")
+
         inventory, alerts = get_system_audit()
+        inventory["upload_speed"] = f"{upload_speed} KB/s"
+        inventory["download_speed"] = f"{download_speed} KB/s"
+        
         cpu_total = psutil.cpu_percent(interval=1)
         
         # Conexiones activas
@@ -207,7 +294,7 @@ def get_metrics():
         except: pass
 
         conns_list = list(set(conns))[:10]
-        alerts.extend(check_advanced_threats(conns_list))
+        alerts.extend(check_advanced_threats(conns_list, upload_speed, download_speed))
         
         return {
             "hostname": socket.gethostname(),
@@ -253,12 +340,18 @@ def check_and_install_persistence():
                 with open(config_target, "w") as f:
                     f.write("https://edr-sentinel-x.onrender.com")
             
-            # Registrar inicio automático en Windows Registry (Run)
+            # Limpiar clave de registro antigua (HKCU Run) si existe
             import winreg as reg
-            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-            key = reg.OpenKey(reg.HKEY_CURRENT_USER, key_path, 0, reg.KEY_SET_VALUE)
-            reg.SetValueEx(key, "SentinelAgent", 0, reg.REG_SZ, f'"{target_exe}"')
-            reg.CloseKey(key)
+            try:
+                key = reg.OpenKey(reg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, reg.KEY_SET_VALUE)
+                reg.DeleteValue(key, "SentinelAgent")
+                reg.CloseKey(key)
+            except:
+                pass
+            
+            # Registrar inicio automático silencioso mediante Tarea Programada de Windows (bypassea UAC en arranque)
+            task_cmd = f'schtasks /create /tn "SentinelAgent" /tr "\\"{target_exe}\\"" /sc onlogon /rl highest /f'
+            subprocess.run(task_cmd, shell=True, capture_output=True)
             
             # Lanzar el proceso persistente y cerrar el actual
             os.startfile(target_exe)
@@ -266,8 +359,13 @@ def check_and_install_persistence():
         except Exception as e:
             print(f"[-] Error registrando persistencia: {e}")
 
+agent_mutex = None
+
 def main():
-    print(f"--- Sentinel Master Agent v4.8 ---")
+    global agent_mutex
+    agent_mutex = check_single_instance()
+    
+    print(f"--- Sentinel Master Agent v5.0 ---")
     if not is_admin():
         print("[*] Solicitando permisos de ADMINISTRADOR...")
         ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
