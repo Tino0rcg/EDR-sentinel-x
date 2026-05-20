@@ -154,14 +154,21 @@ const App = () => {
 
       {/* CONTENIDO CENTRAL */}
       <main className="flex-1 flex overflow-hidden">
-        <div className="flex-1 p-10 overflow-y-auto bg-[#010102]">
-          <div className="max-w-6xl mx-auto">
-            <header className="mb-10 flex justify-between items-end">
-               <div>
-                  <div className="text-blue-500 text-[10px] font-black tracking-widest mb-1 uppercase">SISTEMA EDR ACTIVO</div>
-                  <h2 className="text-6xl font-black tracking-tighter">{view === 'global' ? 'Vista Global' : view === 'network_map' ? 'Mapa de Red' : view === 'users' ? 'Gestión de Personal' : selectedDevice}</h2>
-               </div>
-               {view !== 'global' && view !== 'network_map' && view !== 'users' && (
+        {view === 'network_map' ? (
+          <NetworkMapView 
+              devices={devices} 
+              onToggleQuarantine={handleToggleQuarantine} 
+              currentUserRole={currentUserRole} 
+          />
+        ) : (
+          <div className="flex-1 p-10 overflow-y-auto bg-[#010102]">
+            <div className="max-w-6xl mx-auto">
+              <header className="mb-10 flex justify-between items-end">
+                 <div>
+                    <div className="text-blue-500 text-[10px] font-black tracking-widest mb-1 uppercase">SISTEMA EDR ACTIVO</div>
+                    <h2 className="text-6xl font-black tracking-tighter">{view === 'global' ? 'Vista Global' : view === 'users' ? 'Gestión de Personal' : selectedDevice}</h2>
+                 </div>
+                 {view !== 'global' && view !== 'users' && (
                  <div className="flex flex-col items-end gap-3">
                     {currentUserRole === 'ADMIN' && currentDeviceObj && (
                         <button onClick={() => handleToggleQuarantine(currentDeviceObj.hostname, !currentDeviceObj.quarantine)} className={`px-4 py-2 rounded-xl text-[10px] font-black transition-all ${currentDeviceObj.quarantine ? 'bg-red-500 hover:bg-red-600 text-white animate-pulse shadow-lg shadow-red-500/20' : 'bg-transparent hover:bg-white/5 text-red-500 border border-red-500/20 hover:border-red-500/50'}`}>
@@ -261,13 +268,7 @@ const App = () => {
                        )}
                    </div>
                </div>
-             ) : view === 'network_map' ? (
-                 <NetworkMapView 
-                     devices={devices} 
-                     onToggleQuarantine={handleToggleQuarantine} 
-                     currentUserRole={currentUserRole} 
-                 />
-             ) : view === 'users' && currentUserRole === 'ADMIN' ? (
+             ) : view === 'users' ? (
                 <UsersView API_URL={API_URL} />
             ) : view === 'security' ? (
                <div className="bg-white/5 border border-white/10 p-8 rounded-[40px] shadow-2xl">
@@ -387,8 +388,9 @@ const App = () => {
                   </div>
                </div>
             )}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* AUDITORÍA DERECHA */}
         {view !== 'global' && view !== 'network_map' && view !== 'users' && (

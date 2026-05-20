@@ -44,7 +44,7 @@ interface GraphLink {
   source: string;
   target: string;
   id: string;
-  type: 'server-agent' | 'agent-device';
+  type: 'server-agent' | 'agent-device' | 'agent-agent';
 }
 
 export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
@@ -63,8 +63,26 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<string>('all');
   const [showHelp, setShowHelp] = useState(false);
+  const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
 
   const containerRef = useRef<SVGSVGElement | null>(null);
+
+  // ResizeObserver para centrar el mapa y adaptarlo a toda la pantalla
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const observer = new ResizeObserver((entries) => {
+      for (let entry of entries) {
+        setDimensions({
+          width: entry.contentRect.width || 800,
+          height: entry.contentRect.height || 600
+        });
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   // Construir nodos y enlaces dinámicamente
   const { nodes, links } = useMemo(() => {
@@ -78,6 +96,8 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
       type: 'server',
       status: 'ONLINE'
     });
+
+    const addedDiscoveredNodes = new Map<string, GraphNode>();
 
     devices.forEach((device) => {
       // 2. Nodos Agentes
@@ -101,17 +121,50 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
       // 3. Nodos Descubiertos (solo si el agente está ONLINE y tiene mapa de red)
       if (device.status === 'ONLINE' && Array.isArray(device.network_map)) {
         device.network_map.forEach((d) => {
-          const nodeId = `${device.hostname}-discovered-${d.ip}`;
-          listNodes.push({
-            id: nodeId,
-            label: d.hostname || d.ip,
-            type: 'discovered',
-            status: 'ONLINE',
-            deviceType: d.type,
-            ip: d.ip,
-            mac: d.mac,
-            discoveredBy: device.hostname
-          });
+          // Validar si el dispositivo descubierto es en realidad otro agente
+          const matchedAgent = devices.find(agent => 
+            agent.hostname.toLowerCase() === d.hostname.toLowerCase() || 
+            agent.hostname.toLowerCase() === d.ip.toLowerCase()
+          );
+
+          if (matchedAgent) {
+            // Dibujar un enlace peer-to-peer de adyacencia si es un agente diferente
+            if (matchedAgent.hostname !== device.hostname) {
+              const linkId = `peer-${device.hostname}-${matchedAgent.hostname}`;
+              const reverseLinkId = `peer-${matchedAgent.hostname}-${device.hostname}`;
+              if (!listLinks.some(l => l.id === linkId || l.id === reverseLinkId)) {
+                listLinks.push({
+                  id: linkId,
+                  source: device.hostname,
+                  target: matchedAgent.hostname,
+                  type: 'agent-agent'
+                });
+              }
+            }
+            return;
+          }
+
+          const nodeId = `discovered-${d.ip}`;
+          
+          if (!addedDiscoveredNodes.has(nodeId)) {
+            const newNode: GraphNode = {
+              id: nodeId,
+              label: d.hostname || d.ip,
+              type: 'discovered',
+              status: 'ONLINE',
+              deviceType: d.type,
+              ip: d.ip,
+              mac: d.mac,
+              discoveredBy: device.hostname
+            };
+            addedDiscoveredNodes.set(nodeId, newNode);
+            listNodes.push(newNode);
+          } else {
+            const existingNode = addedDiscoveredNodes.get(nodeId)!;
+            if (existingNode.discoveredBy && !existingNode.discoveredBy.split(', ').includes(device.hostname)) {
+              existingNode.discoveredBy += `, ${device.hostname}`;
+            }
+          }
 
           // Enlace: Agente -> Dispositivo Descubierto
           listLinks.push({
@@ -130,8 +183,8 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
   // Inicializar posiciones con un diseño radial distribuido
   useEffect(() => {
     const initialPositions: Record<string, { x: number; y: number }> = {};
-    const cx = 380;
-    const cy = 300;
+    const cx = dimensions.width / 2;
+    const cy = dimensions.height / 2;
 
     // Posición del servidor central
     initialPositions['server-console'] = { x: cx, y: cy };
@@ -148,8 +201,12 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
       
       initialPositions[agent.id] = { x: ax, y: ay };
 
-      // Filtrar dispositivos descubiertos por este agente
-      const discovered = nodes.filter(n => n.type === 'discovered' && n.discoveredBy === agent.id);
+      // Filtrar dispositivos descubiertos cuyo primer descubridor sea este agente
+      const discovered = nodes.filter(n => {
+        if (n.type !== 'discovered' || !n.discoveredBy) return false;
+        const primaryDiscoverer = n.discoveredBy.split(', ')[0];
+        return primaryDiscoverer === agent.id;
+      });
       const M = discovered.length;
 
       discovered.forEach((dev, j) => {
@@ -178,7 +235,7 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
       });
       return changed ? next : prev;
     });
-  }, [nodes]);
+  }, [nodes, dimensions]);
 
   // Manejar Drag and Drop de Nodos
   const handleNodeMouseDown = (e: React.MouseEvent, nodeId: string) => {
@@ -261,7 +318,7 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
         } else if (node.type === 'agent') {
           // El agente siempre se muestra si algún dispositivo descubierto coincide
           const hasMatchingChild = nodes.some(
-            c => c.type === 'discovered' && c.discoveredBy === node.id && c.deviceType === filterType
+            c => c.type === 'discovered' && c.discoveredBy?.split(', ').includes(node.id) && c.deviceType === filterType
           );
           matchType = hasMatchingChild;
         } else if (node.type === 'discovered') {
@@ -272,11 +329,13 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
       matches[node.id] = matchQuery && matchType;
     });
 
-    // Asegurar que si un nodo descubierto coincide, su agente padre y el servidor también se resalten
+    // Asegurar que si un nodo descubierto coincide, sus agentes descubridores y el servidor también se resalten
     nodes.forEach((node) => {
       if (node.type === 'discovered' && matches[node.id]) {
         if (node.discoveredBy) {
-          matches[node.discoveredBy] = true;
+          node.discoveredBy.split(', ').forEach(agentId => {
+            matches[agentId] = true;
+          });
         }
         matches['server-console'] = true;
       }
@@ -498,8 +557,14 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
                     y1={sourcePos.y}
                     x2={targetPos.x}
                     y2={targetPos.y}
-                    stroke={link.type === 'server-agent' ? 'rgba(59, 130, 246, 0.2)' : 'rgba(255, 255, 255, 0.08)'}
-                    strokeWidth={link.type === 'server-agent' ? 3 : 1.5}
+                    stroke={
+                      link.type === 'server-agent'
+                        ? 'rgba(59, 130, 246, 0.2)'
+                        : link.type === 'agent-agent'
+                        ? 'rgba(168, 85, 247, 0.25)'
+                        : 'rgba(16, 185, 129, 0.08)'
+                    }
+                    strokeWidth={link.type === 'server-agent' ? 3 : link.type === 'agent-agent' ? 2 : 1.5}
                     className="transition-all duration-300"
                     opacity={isFaded ? 0.1 : 1}
                   />
@@ -511,7 +576,13 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
                       y1={sourcePos.y}
                       x2={targetPos.x}
                       y2={targetPos.y}
-                      stroke={link.type === 'server-agent' ? '#3b82f6' : '#a855f7'}
+                      stroke={
+                        link.type === 'server-agent'
+                          ? '#3b82f6'
+                          : link.type === 'agent-agent'
+                          ? '#a855f7'
+                          : '#10b981'
+                      }
                       strokeWidth={link.type === 'server-agent' ? 2 : 1}
                       strokeDasharray="6, 15"
                       opacity={0.6}

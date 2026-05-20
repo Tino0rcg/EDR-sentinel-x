@@ -237,6 +237,37 @@ def get_discovered_devices():
     import re
     import concurrent.futures
     
+    # 1. Barrido de subred local por sockets para poblar la caché ARP del sistema operativo
+    try:
+        ips_to_scan = []
+        for interface, addrs in psutil.net_if_addrs().items():
+            for addr in addrs:
+                if addr.family == socket.AF_INET:
+                    ip = addr.address
+                    if ip.startswith("127.") or ip.startswith("169.254."):
+                        continue
+                    octets = ip.split(".")
+                    if len(octets) == 4:
+                        base = f"{octets[0]}.{octets[1]}.{octets[2]}"
+                        for i in range(1, 255):
+                            scan_ip = f"{base}.{i}"
+                            if scan_ip != ip:
+                                ips_to_scan.append(scan_ip)
+        ips_to_scan = list(set(ips_to_scan))
+        if ips_to_scan:
+            def probe_ip(ip_addr):
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.settimeout(0.1) # 100ms
+                    s.connect_ex((ip_addr, 135))
+                    s.close()
+                except:
+                    pass
+            with concurrent.futures.ThreadPoolExecutor(max_workers=80) as sweep_executor:
+                sweep_executor.map(probe_ip, ips_to_scan)
+    except Exception as scan_err:
+        print(f"[ERROR] Barrido de subred fallido: {scan_err}")
+
     devices = []
     try:
         output = subprocess.run("arp -a", shell=True, capture_output=True, text=True, timeout=5).stdout
@@ -268,13 +299,13 @@ def get_discovered_devices():
                 seen_ips.add(ip)
                 unique_candidates.append((ip, mac))
         
-        unique_candidates = unique_candidates[:15]
+        unique_candidates = unique_candidates[:100]
         
         orig_timeout = socket.getdefaulttimeout()
         socket.setdefaulttimeout(0.5)
         
         try:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
                 futures = {executor.submit(resolve_hostname, ip): (ip, mac) for ip, mac in unique_candidates}
                 for future in concurrent.futures.as_completed(futures):
                     ip, mac = futures[future]
