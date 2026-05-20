@@ -196,6 +196,112 @@ def check_advanced_threats(conns_list, upload_speed, download_speed):
 
     return new_alerts
 
+DNS_CACHE = {}
+LAST_DISCOVERY_TIME = 0
+CACHED_DEVICES = []
+
+def resolve_hostname(ip):
+    if ip in DNS_CACHE:
+        return DNS_CACHE[ip]
+    try:
+        socket.setdefaulttimeout(0.5)
+        hostname = socket.gethostbyaddr(ip)[0]
+    except Exception:
+        hostname = ""
+    DNS_CACHE[ip] = hostname
+    return hostname
+
+def get_device_type(hostname, ip):
+    h = hostname.lower()
+    if "printer" in h or "epson" in h or "hp" in h or "canon" in h:
+        return "Printer"
+    elif "phone" in h or "android" in h or "iphone" in h or "mobile" in h:
+        return "Mobile"
+    elif "router" in h or "gateway" in h or ip.endswith(".1") or ip.endswith(".254"):
+        return "Router"
+    elif "tv" in h or "smarttv" in h or "television" in h:
+        return "TV"
+    elif "server" in h or "nas" in h or "db" in h:
+        return "Server"
+    elif h:
+        return "PC/Laptop"
+    return "Generic"
+
+def get_discovered_devices():
+    global LAST_DISCOVERY_TIME, CACHED_DEVICES
+    current_time = time.time()
+    
+    if current_time - LAST_DISCOVERY_TIME < 60 and CACHED_DEVICES:
+        return CACHED_DEVICES
+        
+    import re
+    import concurrent.futures
+    
+    devices = []
+    try:
+        output = subprocess.run("arp -a", shell=True, capture_output=True, text=True, timeout=5).stdout
+        pattern = re.compile(r"^\s*([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\s+([0-9a-fA-F:-]{17})\s+(\w+)", re.MULTILINE)
+        found = pattern.findall(output)
+        
+        candidates = []
+        for ip, mac, _type in found:
+            mac_std = mac.replace("-", ":").upper()
+            octets = ip.split(".")
+            if len(octets) != 4:
+                continue
+            first_octet = int(octets[0])
+            last_octet = int(octets[3])
+            
+            if first_octet >= 224 and first_octet <= 239:
+                continue
+            if last_octet == 255:
+                continue
+            if ip in ["255.255.255.255", "127.0.0.1", "0.0.0.0"]:
+                continue
+            
+            candidates.append((ip, mac_std))
+        
+        seen_ips = set()
+        unique_candidates = []
+        for ip, mac in candidates:
+            if ip not in seen_ips:
+                seen_ips.add(ip)
+                unique_candidates.append((ip, mac))
+        
+        unique_candidates = unique_candidates[:15]
+        
+        orig_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(0.5)
+        
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {executor.submit(resolve_hostname, ip): (ip, mac) for ip, mac in unique_candidates}
+                for future in concurrent.futures.as_completed(futures):
+                    ip, mac = futures[future]
+                    try:
+                        hostname = future.result()
+                    except Exception:
+                        hostname = ""
+                    
+                    device_type = get_device_type(hostname, ip)
+                    devices.append({
+                        "ip": ip,
+                        "mac": mac,
+                        "hostname": hostname or ip,
+                        "type": device_type
+                    })
+        finally:
+            socket.setdefaulttimeout(orig_timeout)
+            
+    except Exception as e:
+        print(f"[ERROR] En descubrimiento de red: {e}")
+        
+    if devices:
+        CACHED_DEVICES = devices
+        LAST_DISCOVERY_TIME = current_time
+        
+    return CACHED_DEVICES
+
 def get_system_audit():
     # Información amigable (Nombres comerciales reales)
     os_info = run_cmd('wmic os get Caption').replace('Caption', '').strip()
@@ -230,7 +336,8 @@ def get_system_audit():
         "battery": battery_pct,
         "fw_active": fw_active,
         "av_active": av_active,
-        "license_active": license_active
+        "license_active": license_active,
+        "discovered_devices": get_discovered_devices()
     }
 
     alerts = []
@@ -365,7 +472,7 @@ def main():
     global agent_mutex
     agent_mutex = check_single_instance()
     
-    print(f"--- Sentinel Master Agent v5.0 ---")
+    print(f"--- Sentinel Master Agent v9.0 ---")
     if not is_admin():
         print("[*] Solicitando permisos de ADMINISTRADOR...")
         ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)

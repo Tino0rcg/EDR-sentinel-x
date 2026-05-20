@@ -1,8 +1,23 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, Cpu, Database, HardDrive, Monitor, AlertCircle, Server, Shield, Zap, LayoutDashboard, Settings, Bell, ChevronRight, ChevronLeft, Globe, Lock, User, LogOut, ArrowUp, ArrowDown, Clock, List, History, Mail, UserPlus, Trash2, ShieldAlert, Wifi, Info, CheckCircle2, XCircle, ShieldCheck, Battery, Eye, EyeOff } from 'lucide-react';
+import { Activity, Cpu, Database, HardDrive, Monitor, AlertCircle, Server, Shield, Zap, LayoutDashboard, Settings, Bell, ChevronRight, ChevronLeft, Globe, Lock, User, LogOut, ArrowUp, ArrowDown, Clock, List, History, Mail, UserPlus, Trash2, ShieldAlert, Wifi, Info, CheckCircle2, XCircle, ShieldCheck, Battery, Eye, EyeOff, Network } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { NetworkMapView } from './NetworkMapView';
 
-interface Device { hostname: string; last_seen: string; status: 'ONLINE' | 'OFFLINE'; active_connections?: string[]; }
+interface DiscoveredDevice {
+  ip: string;
+  mac: string;
+  hostname: string;
+  type: string;
+}
+
+interface Device { 
+  hostname: string; 
+  last_seen: string; 
+  status: 'ONLINE' | 'OFFLINE'; 
+  active_connections?: string[]; 
+  quarantine?: number; 
+  network_map?: DiscoveredDevice[]; 
+}
 interface Metric { hostname: string; cpu_usage: number; ram_usage: number; disk_usage: number; uptime: string; network: any; processes: any[]; security_alerts: any[]; active_connections: string[]; timestamp: number; }
 
 const API_URL = (import.meta.env.VITE_API_URL && !import.meta.env.VITE_API_URL.includes('dashboard.render.com'))
@@ -14,7 +29,7 @@ const App = () => {
   const [devices, setDevices] = useState<Device[]>([]);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
-  const [view, setView] = useState<'global' | 'dashboard' | 'security' | 'users'>('global');
+  const [view, setView] = useState<'global' | 'dashboard' | 'security' | 'users' | 'network_map'>('global');
   const [expandedProcs, setExpandedProcs] = useState(false);
   const [expandedConns, setExpandedConns] = useState(false);
   const [activeEngineInfo, setActiveEngineInfo] = useState<number | null>(null);
@@ -106,6 +121,7 @@ const App = () => {
         <div className="flex flex-col items-center gap-3 mb-10 text-blue-500 font-black italic text-2xl tracking-tighter"><img src="https://raw.githubusercontent.com/Tino0rcg/sentinel/main/ChatGPT%20Image%2014%20may%202026%2C%2011_28_18%20p.m..png" alt="Sentinel Logo" className="h-24 mix-blend-screen" style={{ WebkitMaskImage: 'radial-gradient(circle, white 35%, transparent 75%)', maskImage: 'radial-gradient(circle, white 35%, transparent 75%)' }} /> SENTINEL-X</div>
         <nav className="space-y-1 mb-8">
           <NavItem icon={<Globe size={18}/>} label="Vista Global" active={view === 'global'} onClick={() => { setView('global'); setSelectedDevice(null); }} />
+          <NavItem icon={<Network size={18}/>} label="Mapa de Red" active={view === 'network_map'} onClick={() => { setView('network_map'); setSelectedDevice(null); }} />
           <NavItem icon={<LayoutDashboard size={18}/>} label="Dashboard" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
           <NavItem icon={<ShieldAlert size={18}/>} label="Seguridad" active={view === 'security'} onClick={() => setView('security')} badge={realThreats.length} />
           {currentUserRole === 'ADMIN' && (
@@ -116,7 +132,7 @@ const App = () => {
           <p className="text-[10px] font-black opacity-20 mb-4 px-2 uppercase">Equipos Conectados</p>
           <input type="text" placeholder="Buscar equipo..." className="w-full bg-white/5 border border-white/10 p-2 mb-4 rounded-xl text-xs text-white" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
           {filteredDevices.map(d => (
-            <button key={d.hostname} onClick={() => setSelectedDevice(d.hostname)} className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${selectedDevice === d.hostname ? 'bg-blue-600/20 text-blue-400' : 'opacity-40 hover:opacity-100'}`}>
+            <button key={d.hostname} onClick={() => { setSelectedDevice(d.hostname); setView('dashboard'); }} className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${selectedDevice === d.hostname ? 'bg-blue-600/20 text-blue-400' : 'opacity-40 hover:opacity-100'}`}>
               <div className={`w-2 h-2 rounded-full ${d.status === 'ONLINE' ? 'bg-green-500' : 'bg-red-500'}`}></div>
               <span className="text-xs font-bold truncate">{d.hostname}</span>
             </button>
@@ -143,9 +159,9 @@ const App = () => {
             <header className="mb-10 flex justify-between items-end">
                <div>
                   <div className="text-blue-500 text-[10px] font-black tracking-widest mb-1 uppercase">SISTEMA EDR ACTIVO</div>
-                  <h2 className="text-6xl font-black tracking-tighter">{view === 'global' ? 'Vista Global' : view === 'users' ? 'Gestión de Personal' : selectedDevice}</h2>
+                  <h2 className="text-6xl font-black tracking-tighter">{view === 'global' ? 'Vista Global' : view === 'network_map' ? 'Mapa de Red' : view === 'users' ? 'Gestión de Personal' : selectedDevice}</h2>
                </div>
-               {view !== 'global' && view !== 'users' && (
+               {view !== 'global' && view !== 'network_map' && view !== 'users' && (
                  <div className="flex flex-col items-end gap-3">
                     {currentUserRole === 'ADMIN' && currentDeviceObj && (
                         <button onClick={() => handleToggleQuarantine(currentDeviceObj.hostname, !currentDeviceObj.quarantine)} className={`px-4 py-2 rounded-xl text-[10px] font-black transition-all ${currentDeviceObj.quarantine ? 'bg-red-500 hover:bg-red-600 text-white animate-pulse shadow-lg shadow-red-500/20' : 'bg-transparent hover:bg-white/5 text-red-500 border border-red-500/20 hover:border-red-500/50'}`}>
@@ -245,7 +261,13 @@ const App = () => {
                        )}
                    </div>
                </div>
-            ) : view === 'users' && currentUserRole === 'ADMIN' ? (
+             ) : view === 'network_map' ? (
+                 <NetworkMapView 
+                     devices={devices} 
+                     onToggleQuarantine={handleToggleQuarantine} 
+                     currentUserRole={currentUserRole} 
+                 />
+             ) : view === 'users' && currentUserRole === 'ADMIN' ? (
                 <UsersView API_URL={API_URL} />
             ) : view === 'security' ? (
                <div className="bg-white/5 border border-white/10 p-8 rounded-[40px] shadow-2xl">
@@ -369,7 +391,7 @@ const App = () => {
         </div>
 
         {/* AUDITORÍA DERECHA */}
-        {view !== 'global' && (
+        {view !== 'global' && view !== 'network_map' && view !== 'users' && (
         <aside className="w-80 bg-black/40 border-l border-white/5 p-8 flex flex-col overflow-y-auto">
            <h3 className="text-[10px] font-black mb-8 opacity-40 tracking-widest uppercase">Auditoría Técnica</h3>
            <div className="space-y-8">

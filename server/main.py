@@ -52,7 +52,7 @@ class UserDB(Base):
 
 class DeviceDB(Base):
     __tablename__ = "devices"
-    hostname = Column(String, primary_key=True); last_seen = Column(DateTime); status = Column(String); active_connections = Column(JSON); quarantine = Column(Integer, default=0)
+    hostname = Column(String, primary_key=True); last_seen = Column(DateTime); status = Column(String); active_connections = Column(JSON); quarantine = Column(Integer, default=0); network_map = Column(JSON)
 
 class MetricDB(Base):
     __tablename__ = "metrics"
@@ -144,6 +144,12 @@ async def lifespan(app: FastAPI):
             db.commit()
         except:
             db.rollback()
+        try:
+            from sqlalchemy import text
+            db.execute(text("ALTER TABLE devices ADD COLUMN network_map JSON"))
+            db.commit()
+        except:
+            db.rollback()
         if db.query(UserDB).count() == 0:
             h = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
             db.add(UserDB(email="admin@sentinel.com", hashed_password=h, role="ADMIN")); db.commit()
@@ -174,6 +180,8 @@ async def post_metrics(data: Metrics, background_tasks: BackgroundTasks):
         if not d: d = DeviceDB(hostname=data.hostname); db.add(d)
         d.status = "ONLINE"; d.last_seen = datetime.datetime.utcnow()
         d.active_connections = data.active_connections
+        if isinstance(data.network, dict):
+            d.network_map = data.network.get("discovered_devices", [])
         is_quarantined = d.quarantine == 1
         
         # PROCESAR AMENAZAS CON FILTRO DRÁSTICO

@@ -12,12 +12,12 @@ if os.path.exists('build'):
         print(f"Aviso al limpiar build: {e}")
 
 # Evitar borrar toda la carpeta dist si está bloqueada, solo intentar remover el exe anterior de V8
-v8_exe = os.path.join('dist', 'SentinelAgent_V8.exe')
-if os.path.exists(v8_exe):
+v9_exe = os.path.join('dist', 'SentinelAgent_V9.exe')
+if os.path.exists(v9_exe):
     try:
-        os.remove(v8_exe)
+        os.remove(v9_exe)
     except Exception as e:
-        print(f"Aviso al eliminar v8_exe anterior: {e}")
+        print(f"Aviso al eliminar v9_exe anterior: {e}")
 
 print("Construyendo el archivo ejecutable silencioso...")
 
@@ -25,13 +25,13 @@ PyInstaller.__main__.run([
     'agent.py',
     '--onefile',
     '--noconsole',
-    '--name=SentinelAgent_V8',
+    '--name=SentinelAgent_V9',
     '--clean'
 ])
 
 print("--- Compilación Exitosa ---")
-src = os.path.join('dist', 'SentinelAgent_V8.exe')
-dst = 'SentinelAgent_V8.exe'
+src = os.path.join('dist', 'SentinelAgent_V9.exe')
+dst = 'SentinelAgent_V9.exe'
 if os.path.exists(src):
     try:
         shutil.copy2(src, dst)
