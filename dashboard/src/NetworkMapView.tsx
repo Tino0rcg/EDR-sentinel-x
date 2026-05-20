@@ -30,7 +30,7 @@ interface NetworkMapViewProps {
 interface GraphNode {
   id: string;
   label: string;
-  type: 'server' | 'agent' | 'discovered';
+  type: 'server' | 'agent' | 'discovered' | 'Router';
   status: 'ONLINE' | 'OFFLINE';
   deviceType?: string;
   quarantine?: boolean;
@@ -97,6 +97,50 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
       status: 'ONLINE'
     });
 
+    // Detectar routers centrales únicos
+    const centralRouters = new Map<string, DiscoveredDevice & { discoveredBy: string[] }>();
+    devices.forEach((device) => {
+      if (device.status === 'ONLINE' && Array.isArray(device.network_map)) {
+        device.network_map.forEach((d) => {
+          if (d.type === 'Router') {
+            const existing = centralRouters.get(d.ip);
+            if (existing) {
+              if (!existing.discoveredBy.includes(device.hostname)) {
+                existing.discoveredBy.push(device.hostname);
+              }
+            } else {
+              centralRouters.set(d.ip, {
+                ...d,
+                discoveredBy: [device.hostname]
+              });
+            }
+          }
+        });
+      }
+    });
+
+    // Crear nodos de núcleo para cada router central
+    centralRouters.forEach((router, ip) => {
+      listNodes.push({
+        id: `central-router-${ip}`,
+        label: router.hostname || `Router (${ip})`,
+        type: 'Router',
+        status: 'ONLINE',
+        deviceType: 'Router',
+        ip: router.ip,
+        mac: router.mac,
+        discoveredBy: router.discoveredBy.join(', ')
+      });
+
+      // Conectar Servidor -> Router
+      listLinks.push({
+        id: `server-router-${ip}`,
+        source: 'server-console',
+        target: `central-router-${ip}`,
+        type: 'server-agent'
+      });
+    });
+
     const addedDiscoveredNodes = new Map<string, GraphNode>();
 
     devices.forEach((device) => {
@@ -110,17 +154,32 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
         originalDevice: device
       });
 
-      // Enlace: Servidor -> Agente
-      listLinks.push({
-        id: `server-${device.hostname}`,
-        source: 'server-console',
-        target: device.hostname,
-        type: 'server-agent'
-      });
+      // Conectar Agente a los Routers Centrales (o al Servidor si no hay routers)
+      if (centralRouters.size > 0) {
+        centralRouters.forEach((router, ip) => {
+          listLinks.push({
+            id: `router-agent-${ip}-${device.hostname}`,
+            source: `central-router-${ip}`,
+            target: device.hostname,
+            type: 'server-agent'
+          });
+        });
+      } else {
+        // Enlace por defecto: Servidor -> Agente
+        listLinks.push({
+          id: `server-${device.hostname}`,
+          source: 'server-console',
+          target: device.hostname,
+          type: 'server-agent'
+        });
+      }
 
       // 3. Nodos Descubiertos (solo si el agente está ONLINE y tiene mapa de red)
       if (device.status === 'ONLINE' && Array.isArray(device.network_map)) {
         device.network_map.forEach((d) => {
+          // Filtrar routers para evitar duplicados como hojas secundarias
+          if (d.type === 'Router') return;
+
           // Validar si el dispositivo descubierto es en realidad otro agente
           const matchedAgent = devices.find(agent => 
             agent.hostname.toLowerCase() === d.hostname.toLowerCase() || 
@@ -186,8 +245,29 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
     const cx = dimensions.width / 2;
     const cy = dimensions.height / 2;
 
-    // Posición del servidor central
-    initialPositions['server-console'] = { x: cx, y: cy };
+    // Detectar routers centrales
+    const centralRouterNodes = nodes.filter(n => n.type === 'Router');
+    const K = centralRouterNodes.length;
+
+    if (K === 0) {
+      // Si no hay routers: Servidor en el centro exacto
+      initialPositions['server-console'] = { x: cx, y: cy };
+    } else if (K === 1) {
+      // Si hay 1 router: Router en el centro exacto, Servidor desplazado arriba a (cx, cy - 140)
+      initialPositions[centralRouterNodes[0].id] = { x: cx, y: cy };
+      initialPositions['server-console'] = { x: cx, y: cy - 140 };
+    } else {
+      // Si hay múltiples routers: Servidor desplazado arriba a (cx, cy - 150)
+      // Routers en anillo central de radio 60 alrededor del centro
+      initialPositions['server-console'] = { x: cx, y: cy - 150 };
+      centralRouterNodes.forEach((router, idx) => {
+        const theta = (2 * Math.PI * idx) / K;
+        initialPositions[router.id] = {
+          x: cx + 60 * Math.cos(theta),
+          y: cy + 60 * Math.sin(theta)
+        };
+      });
+    }
 
     // Filtrar agentes
     const agents = nodes.filter(n => n.type === 'agent');
@@ -195,7 +275,7 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
 
     agents.forEach((agent, i) => {
       const theta = (2 * Math.PI * i) / (N || 1);
-      const R1 = 180;
+      const R1 = 240; // radio aumentado para dar espacio al núcleo
       const ax = cx + R1 * Math.cos(theta);
       const ay = cy + R1 * Math.sin(theta);
       
@@ -315,10 +395,14 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
       if (filterType !== 'all') {
         if (node.type === 'server') {
           matchType = false;
+        } else if (node.type === 'Router') {
+          matchType = filterType === 'Router';
         } else if (node.type === 'agent') {
-          // El agente siempre se muestra si algún dispositivo descubierto coincide
+          // El agente siempre se muestra si algún dispositivo descubierto o router de núcleo coincide
           const hasMatchingChild = nodes.some(
-            c => c.type === 'discovered' && c.discoveredBy?.split(', ').includes(node.id) && c.deviceType === filterType
+            c => (c.type === 'discovered' || c.type === 'Router') && 
+                 c.discoveredBy?.split(', ').includes(node.id) && 
+                 c.deviceType === filterType
           );
           matchType = hasMatchingChild;
         } else if (node.type === 'discovered') {
@@ -329,9 +413,9 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
       matches[node.id] = matchQuery && matchType;
     });
 
-    // Asegurar que si un nodo descubierto coincide, sus agentes descubridores y el servidor también se resalten
+    // Asegurar que si un nodo descubierto o router central coincide, sus agentes descubridores y el servidor también se resalten
     nodes.forEach((node) => {
-      if (node.type === 'discovered' && matches[node.id]) {
+      if ((node.type === 'discovered' || node.type === 'Router') && matches[node.id]) {
         if (node.discoveredBy) {
           node.discoveredBy.split(', ').forEach(agentId => {
             matches[agentId] = true;
@@ -356,6 +440,7 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
   // Iconos por tipo de dispositivo
   const getNodeIcon = (type: string, deviceType?: string, status?: string, q?: boolean) => {
     const size = 18;
+    if (type === 'Router') return <Wifi size={24} className="text-cyan-400 animate-pulse" />;
     if (type === 'server') return <Server size={22} className="text-blue-400" />;
     
     if (type === 'agent') {
@@ -375,8 +460,16 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
     }
   };
 
+  const getIconOffset = (nodeType: string) => {
+    if (nodeType === 'Router') return -12;
+    if (nodeType === 'server') return -11;
+    if (nodeType === 'agent') return -10;
+    return -9; // discovered
+  };
+
   // Color de borde de los nodos
   const getNodeColor = (node: GraphNode) => {
+    if (node.type === 'Router') return 'from-cyan-500 to-cyan-700 shadow-cyan-500/50';
     if (node.type === 'server') return 'from-blue-600 to-indigo-600 shadow-blue-500/50';
     if (node.type === 'agent') {
       if (node.quarantine) return 'from-red-600 to-orange-600 shadow-red-500/50 animate-pulse';
@@ -549,6 +642,8 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
               const isTargetMatch = nodeMatchesFilter[link.target];
               const isFaded = !isSourceMatch || !isTargetMatch;
 
+              const isRouterLink = link.source.startsWith('central-router-') || link.target.startsWith('central-router-');
+
               return (
                 <g key={link.id}>
                   {/* Línea de fondo del enlace */}
@@ -558,13 +653,15 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
                     x2={targetPos.x}
                     y2={targetPos.y}
                     stroke={
-                      link.type === 'server-agent'
+                      isRouterLink
+                        ? 'rgba(34, 211, 238, 0.25)'
+                        : link.type === 'server-agent'
                         ? 'rgba(59, 130, 246, 0.2)'
                         : link.type === 'agent-agent'
                         ? 'rgba(168, 85, 247, 0.25)'
                         : 'rgba(16, 185, 129, 0.08)'
                     }
-                    strokeWidth={link.type === 'server-agent' ? 3 : link.type === 'agent-agent' ? 2 : 1.5}
+                    strokeWidth={isRouterLink ? 3.5 : link.type === 'server-agent' ? 3 : link.type === 'agent-agent' ? 2 : 1.5}
                     className="transition-all duration-300"
                     opacity={isFaded ? 0.1 : 1}
                   />
@@ -577,20 +674,22 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
                       x2={targetPos.x}
                       y2={targetPos.y}
                       stroke={
-                        link.type === 'server-agent'
+                        isRouterLink
+                          ? '#22d3ee'
+                          : link.type === 'server-agent'
                           ? '#3b82f6'
                           : link.type === 'agent-agent'
                           ? '#a855f7'
                           : '#10b981'
                       }
-                      strokeWidth={link.type === 'server-agent' ? 2 : 1}
+                      strokeWidth={isRouterLink ? 3.5 : link.type === 'server-agent' ? 2 : 1}
                       strokeDasharray="6, 15"
                       opacity={0.6}
                     >
                       <animate
                         attributeName="stroke-dashoffset"
                         values="100;0"
-                        dur="6s"
+                        dur={isRouterLink ? "4s" : "6s"}
                         repeatCount="indefinite"
                       />
                     </line>
@@ -609,6 +708,7 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
               let radius = 24;
               if (node.type === 'server') radius = 30;
               else if (node.type === 'agent') radius = 26;
+              else if (node.type === 'Router') radius = 32;
 
               return (
                 <g
@@ -622,7 +722,7 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
                   {isSelected && (
                     <circle
                       r={radius + 8}
-                      className="fill-blue-500/10 stroke-blue-500/30"
+                      className={node.type === 'Router' ? "fill-cyan-500/10 stroke-cyan-500/30" : "fill-blue-500/10 stroke-blue-500/30"}
                       strokeWidth={1}
                       filter="url(#glow-heavy)"
                     />
@@ -644,6 +744,23 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
                     </circle>
                   )}
 
+                  {/* Anillo de pulso exclusivo para routers centrales */}
+                  {node.type === 'Router' && (
+                    <circle
+                      r={radius + 8}
+                      className="fill-cyan-500/5 stroke-cyan-400/40"
+                      strokeWidth={1.5}
+                      filter="url(#glow-light)"
+                    >
+                      <animate
+                        attributeName="r"
+                        values={`${radius + 4};${radius + 14};${radius + 4}`}
+                        dur="2.5s"
+                        repeatCount="indefinite"
+                      />
+                    </circle>
+                  )}
+
                   {/* Círculo Principal de Fondo con Gradiente */}
                   <circle
                     r={radius}
@@ -658,15 +775,31 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
                   {/* Gradiente Local para este Nodo específico */}
                   <defs>
                     <radialGradient id={`grad-${node.id}`} cx="30%" cy="30%" r="70%">
-                      <stop offset="0%" stopColor={node.type === 'server' ? '#60a5fa' : node.type === 'agent' ? (node.quarantine ? '#f87171' : node.status === 'ONLINE' ? '#34d399' : '#94a3b8') : '#c084fc'} />
-                      <stop offset="100%" stopColor={node.type === 'server' ? '#1e3a8a' : node.type === 'agent' ? (node.quarantine ? '#991b1b' : node.status === 'ONLINE' ? '#065f46' : '#334155') : '#581c87'} />
+                      <stop 
+                        offset="0%" 
+                        stopColor={
+                          node.type === 'Router' ? '#22d3ee' :
+                          node.type === 'server' ? '#60a5fa' : 
+                          node.type === 'agent' ? (node.quarantine ? '#f87171' : node.status === 'ONLINE' ? '#34d399' : '#94a3b8') : 
+                          '#c084fc'
+                        } 
+                      />
+                      <stop 
+                        offset="100%" 
+                        stopColor={
+                          node.type === 'Router' ? '#0e7490' :
+                          node.type === 'server' ? '#1e3a8a' : 
+                          node.type === 'agent' ? (node.quarantine ? '#991b1b' : node.status === 'ONLINE' ? '#065f46' : '#334155') : 
+                          '#581c87'
+                        } 
+                      />
                     </radialGradient>
                   </defs>
 
                   {/* Icono del Dispositivo */}
                   <g transform="translate(0, 0)" className="text-white flex items-center justify-center pointer-events-none">
                     {/* Pequeño offset para centrar el icono dentro del círculo */}
-                    <g transform="translate(-10, -10)">
+                    <g transform={`translate(${getIconOffset(node.type)}, ${getIconOffset(node.type)})`}>
                       {getNodeIcon(node.type, node.deviceType, node.status, node.quarantine)}
                     </g>
                   </g>
@@ -722,8 +855,14 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
               </div>
               <div>
                 <p className="text-[9px] font-black opacity-30 uppercase">Categoría</p>
-                <p className="text-sm font-bold text-white capitalize">
-                  {selectedNode.type === 'server' ? 'Servidor Central' : selectedNode.type === 'agent' ? 'Agente de Seguridad' : `Descubierto: ${selectedNode.deviceType}`}
+                <p className="text-sm font-bold text-white">
+                  {selectedNode.type === 'server'
+                    ? 'Servidor Central'
+                    : selectedNode.type === 'Router'
+                    ? 'Router Principal (Puerta de Enlace)'
+                    : selectedNode.type === 'agent'
+                    ? 'Agente de Seguridad'
+                    : `Descubierto: ${selectedNode.deviceType}`}
                 </p>
               </div>
             </div>
@@ -755,7 +894,7 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
                 </>
               )}
 
-              {selectedNode.type === 'discovered' && (
+              {(selectedNode.type === 'discovered' || selectedNode.type === 'Router') && (
                 <>
                   <DetailRow label="Dirección IP" value={selectedNode.ip || '---'} />
                   <DetailRow label="Dirección MAC" value={selectedNode.mac || '---'} />
