@@ -278,6 +278,38 @@ const App = () => {
                     </div>
                   </div>
 
+                  {/* ANCHO DE BANDA EN TIEMPO REAL */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                      <div className="bg-white/5 border border-white/5 rounded-[32px] p-6 flex items-center justify-between shadow-lg relative overflow-hidden group hover:border-blue-500/30 transition-all">
+                          <div className="flex items-center gap-4">
+                              <div className="w-12 h-12 bg-blue-500/10 rounded-2xl flex items-center justify-center text-blue-400 group-hover:scale-110 transition-transform">
+                                  <ArrowDown size={24} />
+                              </div>
+                              <div>
+                                  <p className="text-[10px] font-black opacity-30 uppercase tracking-widest">Tráfico de Bajada (Download)</p>
+                                  <h4 className="text-3xl font-black mt-1 text-white">{inventory.download_speed || '0.0 KB/s'}</h4>
+                              </div>
+                          </div>
+                          <div className="text-[10px] font-black px-3 py-1 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                              RECIBIENDO
+                          </div>
+                      </div>
+                      <div className="bg-white/5 border border-white/5 rounded-[32px] p-6 flex items-center justify-between shadow-lg relative overflow-hidden group hover:border-purple-500/30 transition-all">
+                          <div className="flex items-center gap-4">
+                              <div className="w-12 h-12 bg-purple-500/10 rounded-2xl flex items-center justify-center text-purple-400 group-hover:scale-110 transition-transform">
+                                  <ArrowUp size={24} />
+                              </div>
+                              <div>
+                                  <p className="text-[10px] font-black opacity-30 uppercase tracking-widest">Tráfico de Subida (Upload)</p>
+                                  <h4 className="text-3xl font-black mt-1 text-white">{inventory.upload_speed || '0.0 KB/s'}</h4>
+                              </div>
+                          </div>
+                          <div className="text-[10px] font-black px-3 py-1 rounded-full bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                              ENVIANDO
+                          </div>
+                      </div>
+                  </div>
+
                   {/* GRÁFICA */}
                   <div className="bg-white/5 border border-white/5 rounded-[40px] p-10 h-[320px]">
                      <h3 className="font-black mb-8 flex items-center gap-2"><Activity size={20}/> Historial de Rendimiento</h3>
