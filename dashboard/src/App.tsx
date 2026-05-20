@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Activity, Cpu, Database, HardDrive, Monitor, AlertCircle, Server, Shield, Zap, LayoutDashboard, Settings, Bell, ChevronRight, ChevronLeft, Globe, Lock, User, LogOut, ArrowUp, ArrowDown, Clock, List, History, Mail, UserPlus, Trash2, ShieldAlert, Wifi, Info, CheckCircle2, XCircle, ShieldCheck, Battery, Eye, EyeOff, Network } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { NetworkMapView } from './NetworkMapView';
+import { NetworkScannerView } from './NetworkScannerView';
 
 interface DiscoveredDevice {
   ip: string;
@@ -29,7 +30,7 @@ const App = () => {
   const [devices, setDevices] = useState<Device[]>([]);
   const [alerts, setAlerts] = useState<any[]>([]);
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
-  const [view, setView] = useState<'global' | 'dashboard' | 'security' | 'users' | 'network_map'>('global');
+  const [view, setView] = useState<'global' | 'dashboard' | 'security' | 'users' | 'network_map' | 'network_scanner'>('global');
   const [expandedProcs, setExpandedProcs] = useState(false);
   const [expandedConns, setExpandedConns] = useState(false);
   const [activeEngineInfo, setActiveEngineInfo] = useState<number | null>(null);
@@ -122,6 +123,7 @@ const App = () => {
         <nav className="space-y-1 mb-8">
           <NavItem icon={<Globe size={18}/>} label="Vista Global" active={view === 'global'} onClick={() => { setView('global'); setSelectedDevice(null); }} />
           <NavItem icon={<Network size={18}/>} label="Mapa de Red" active={view === 'network_map'} onClick={() => { setView('network_map'); setSelectedDevice(null); }} />
+          <NavItem icon={<Wifi size={18}/>} label="Dispositivos en Red" active={view === 'network_scanner'} onClick={() => { setView('network_scanner'); setSelectedDevice(null); }} />
           <NavItem icon={<LayoutDashboard size={18}/>} label="Dashboard" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
           <NavItem icon={<ShieldAlert size={18}/>} label="Seguridad" active={view === 'security'} onClick={() => setView('security')} badge={realThreats.length} />
           {currentUserRole === 'ADMIN' && (
@@ -159,6 +161,11 @@ const App = () => {
               devices={devices} 
               onToggleQuarantine={handleToggleQuarantine} 
               currentUserRole={currentUserRole} 
+          />
+        ) : view === 'network_scanner' ? (
+          <NetworkScannerView 
+              devices={devices} 
+              onRefresh={fetchDevices} 
           />
         ) : (
           <div className="flex-1 p-10 overflow-y-auto bg-[#010102]">

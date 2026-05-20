@@ -3,7 +3,16 @@ from pydantic import BaseModel
 from typing import List, Dict, Optional, Any
 import time
 import os
+import sys
 from dotenv import load_dotenv
+
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
+except Exception:
+    pass
 
 load_dotenv()
 from fastapi.middleware.cors import CORSMiddleware

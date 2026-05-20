@@ -1,1 +1,1 @@
-localhost
+https://edr-sentinel-x.onrender.com

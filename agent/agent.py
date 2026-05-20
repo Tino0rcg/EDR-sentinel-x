@@ -258,9 +258,14 @@ def get_discovered_devices():
             def probe_ip(ip_addr):
                 try:
                     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.settimeout(0.1) # 100ms
-                    s.connect_ex((ip_addr, 135))
+                    s.settimeout(0.08) # 80ms
+                    res = s.connect_ex((ip_addr, 135))
                     s.close()
+                    if res != 0:
+                        s2 = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s2.settimeout(0.08)
+                        s2.connect_ex((ip_addr, 80))
+                        s2.close()
                 except:
                     pass
             with concurrent.futures.ThreadPoolExecutor(max_workers=80) as sweep_executor:
