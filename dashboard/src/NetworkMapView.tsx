@@ -63,6 +63,8 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<string>('all');
   const [showHelp, setShowHelp] = useState(false);
+  const [hoveredNodeId, setHoveredNodeId] = useState<string | null>(null);
+  const [showGrid, setShowGrid] = useState(true);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
 
   const containerRef = useRef<SVGSVGElement | null>(null);
@@ -495,6 +497,25 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
     setPan({ x: 0, y: 0 });
   };
 
+  // Métricas de red consolidadas
+  const metrics = useMemo(() => {
+    const totalAgents = devices.length;
+    const onlineAgents = devices.filter(d => d.status === 'ONLINE').length;
+    const offlineAgents = totalAgents - onlineAgents;
+    const quarantined = devices.filter(d => d.quarantine === 1).length;
+    const totalDiscovered = nodes.filter(n => n.type === 'discovered').length;
+    const totalRouters = nodes.filter(n => n.type === 'Router').length;
+
+    return {
+      totalAgents,
+      onlineAgents,
+      offlineAgents,
+      quarantined,
+      totalDiscovered,
+      totalRouters
+    };
+  }, [devices, nodes]);
+
   return (
     <div className="h-full w-full flex flex-col relative overflow-hidden bg-[#010102]">
       {/* BARRA SUPERIOR DE FILTROS */}
@@ -570,6 +591,52 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
 
       {/* ÁREA DEL MAPA (SVG INTERACTIVO) */}
       <div className="flex-1 w-full relative cursor-grab active:cursor-grabbing select-none overflow-hidden">
+        {/* Panel de Estadísticas Flotante Premium */}
+        <div className="absolute top-4 right-4 p-4 bg-black/60 border border-white/5 backdrop-blur-xl rounded-2xl z-10 space-y-3 shadow-2xl min-w-[200px] text-xs pointer-events-auto transition-all duration-300">
+          <div className="flex items-center justify-between border-b border-white/5 pb-2">
+            <span className="font-black text-white/50 uppercase tracking-widest text-[9px]">Monitoreo de Red</span>
+            <div className="flex items-center gap-1.5">
+              <span className={`w-2 h-2 rounded-full ${metrics.quarantined > 0 ? 'bg-red-500 animate-ping' : 'bg-emerald-500 animate-pulse'}`} />
+              <span className="text-[10px] font-bold text-white/80">{metrics.quarantined > 0 ? 'Alerta' : 'Protegida'}</span>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 text-[11px]">
+            <div>
+              <p className="text-white/40 text-[9px] uppercase font-bold">Agentes EDR</p>
+              <p className="text-base font-black text-white mt-0.5">
+                {metrics.onlineAgents}<span className="text-white/30 text-xs font-normal"> / {metrics.totalAgents}</span>
+              </p>
+            </div>
+            <div>
+              <p className="text-white/40 text-[9px] uppercase font-bold">Descubiertos</p>
+              <p className="text-base font-black text-cyan-400 mt-0.5">{metrics.totalDiscovered}</p>
+            </div>
+            <div>
+              <p className="text-white/40 text-[9px] uppercase font-bold">Routers Núcleo</p>
+              <p className="text-base font-black text-blue-400 mt-0.5">{metrics.totalRouters}</p>
+            </div>
+            <div>
+              <p className="text-white/40 text-[9px] uppercase font-bold">Aislados</p>
+              <p className={`text-base font-black mt-0.5 ${metrics.quarantined > 0 ? 'text-red-500 animate-pulse' : 'text-white/50'}`}>
+                {metrics.quarantined}
+              </p>
+            </div>
+          </div>
+          
+          {/* Botón rápido para activar/desactivar la retícula */}
+          <div className="flex items-center justify-between pt-2 border-t border-white/5">
+            <span className="text-white/40 text-[9px] uppercase font-bold">Ver Cuadrícula</span>
+            <button
+              onClick={() => setShowGrid(!showGrid)}
+              className={`px-2.5 py-1 rounded-md text-[9px] font-black transition-all ${
+                showGrid ? 'bg-[#22d3ee]/20 text-[#22d3ee] border border-[#22d3ee]/30' : 'bg-white/5 text-white/40 border border-white/10'
+              }`}
+            >
+              {showGrid ? 'ACTIVA' : 'INACTIVA'}
+            </button>
+          </div>
+        </div>
+
         {/* Panel de ayuda flotante */}
         {showHelp && (
           <div className="absolute top-4 left-4 p-5 bg-black/80 border border-white/10 backdrop-blur-xl rounded-2xl text-[11px] text-white/70 max-w-xs z-10 space-y-3 shadow-2xl">
@@ -616,6 +683,11 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
               <feGaussianBlur stdDeviation="3" result="blur" />
               <feComposite in="SourceGraphic" in2="blur" operator="over" />
             </filter>
+            {/* Patrón de Cuadrícula Tecnológica */}
+            <pattern id="grid-pattern" width="50" height="50" patternUnits="userSpaceOnUse">
+              <path d="M 50 0 L 0 0 0 50" fill="none" stroke="rgba(255, 255, 255, 0.035)" strokeWidth="1" />
+              <circle cx="50" cy="50" r="1.5" fill="rgba(34, 211, 238, 0.15)" />
+            </pattern>
             {/* Punta de Flecha para Enlaces */}
             <marker
               id="arrow"
@@ -632,6 +704,17 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
 
           {/* GRUPO CON TRANSFORMACIONES DE PAN & ZOOM */}
           <g transform={`translate(${pan.x}, ${pan.y}) scale(${zoom})`}>
+            {/* Cuadrícula de fondo */}
+            {showGrid && (
+              <rect
+                x="-5000"
+                y="-5000"
+                width="10000"
+                height="10000"
+                fill="url(#grid-pattern)"
+                className="pointer-events-none"
+              />
+            )}
             {/* ENLACES / CONEXIONES */}
             {links.map((link) => {
               const sourcePos = nodePositions[link.source];
@@ -644,8 +727,22 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
 
               const isRouterLink = link.source.startsWith('central-router-') || link.target.startsWith('central-router-');
 
+              // Cálculos de Spotlight (Foco por Hover)
+              const hasHoveredNode = hoveredNodeId !== null;
+              const isLinkConnectedToHovered = link.source === hoveredNodeId || link.target === hoveredNodeId;
+              
+              let opacityValue = isFaded ? 0.05 : 1;
+              if (hasHoveredNode) {
+                opacityValue = isLinkConnectedToHovered ? 0.95 : 0.04;
+              }
+
+              // Acelerar animación si el enlace conecta con el nodo en hover
+              const animDuration = isLinkConnectedToHovered 
+                ? (isRouterLink ? "1.8s" : "2.5s") 
+                : (isRouterLink ? "4s" : "6s");
+
               return (
-                <g key={link.id}>
+                <g key={link.id} className="transition-all duration-300">
                   {/* Línea de fondo del enlace */}
                   <line
                     x1={sourcePos.x}
@@ -663,11 +760,11 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
                     }
                     strokeWidth={isRouterLink ? 3.5 : link.type === 'server-agent' ? 3 : link.type === 'agent-agent' ? 2 : 1.5}
                     className="transition-all duration-300"
-                    opacity={isFaded ? 0.1 : 1}
+                    opacity={opacityValue}
                   />
 
                   {/* Línea animada (pulso de datos) para enlaces activos/resaltados */}
-                  {!isFaded && (
+                  {(!isFaded && (!hasHoveredNode || isLinkConnectedToHovered)) && (
                     <line
                       x1={sourcePos.x}
                       y1={sourcePos.y}
@@ -684,12 +781,12 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
                       }
                       strokeWidth={isRouterLink ? 3.5 : link.type === 'server-agent' ? 2 : 1}
                       strokeDasharray="6, 15"
-                      opacity={0.6}
+                      opacity={0.7}
                     >
                       <animate
                         attributeName="stroke-dashoffset"
                         values="100;0"
-                        dur={isRouterLink ? "4s" : "6s"}
+                        dur={animDuration}
                         repeatCount="indefinite"
                       />
                     </line>
@@ -710,20 +807,43 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
               else if (node.type === 'agent') radius = 26;
               else if (node.type === 'Router') radius = 32;
 
+              // Cálculos de Spotlight (Foco por Hover)
+              const hasHoveredNode = hoveredNodeId !== null;
+              const isNodeHovered = node.id === hoveredNodeId;
+              const isConnectedToHovered = links.some(l => 
+                (l.source === hoveredNodeId && l.target === node.id) || 
+                (l.target === hoveredNodeId && l.source === node.id)
+              );
+
+              // Opacidad según si coincide con filtros y Spotlight
+              let opacityValue = isMatch ? 1 : 0.25;
+              if (hasHoveredNode) {
+                if (isNodeHovered || isConnectedToHovered || node.type === 'server') {
+                  opacityValue = 1;
+                } else {
+                  opacityValue = 0.12; // Atenuar nodos no relacionados
+                }
+              }
+
+              // Escala de transformación al hacer hover
+              const scaleValue = isNodeHovered ? 1.15 : 1;
+
               return (
                 <g
                   key={node.id}
-                  transform={`translate(${pos.x}, ${pos.y})`}
+                  transform={`translate(${pos.x}, ${pos.y}) scale(${scaleValue})`}
                   onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
-                  className="cursor-pointer select-none group"
-                  opacity={isMatch ? 1 : 0.25}
+                  onMouseEnter={() => setHoveredNodeId(node.id)}
+                  onMouseLeave={() => setHoveredNodeId(null)}
+                  className="cursor-pointer select-none group transition-all duration-300 ease-out"
+                  opacity={opacityValue}
                 >
                   {/* Efecto Glow exterior para nodos seleccionados o críticos */}
-                  {isSelected && (
+                  {(isSelected || (isNodeHovered && hasHoveredNode)) && (
                     <circle
                       r={radius + 8}
-                      className={node.type === 'Router' ? "fill-cyan-500/10 stroke-cyan-500/30" : "fill-blue-500/10 stroke-blue-500/30"}
-                      strokeWidth={1}
+                      className={`transition-all duration-300 ${node.type === 'Router' ? "fill-cyan-500/10 stroke-cyan-500/35" : "fill-blue-500/10 stroke-blue-500/35"}`}
+                      strokeWidth={1.5}
                       filter="url(#glow-heavy)"
                     />
                   )}
@@ -765,8 +885,8 @@ export const NetworkMapView: React.FC<NetworkMapViewProps> = ({
                   <circle
                     r={radius}
                     fill="url(#node-grad)"
-                    className={`stroke-white/10 hover:stroke-white/30 transition-colors shadow-2xl`}
-                    strokeWidth={isSelected ? 2 : 1}
+                    className={`stroke-white/10 group-hover:stroke-white/40 transition-colors shadow-2xl`}
+                    strokeWidth={isSelected ? 2.5 : 1}
                     style={{
                       fill: `url(#grad-${node.id})`
                     }}
