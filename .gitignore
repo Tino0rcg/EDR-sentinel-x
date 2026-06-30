@@ -17,3 +17,4 @@ dashboard/.env*
 # Temporary files
 agent/build/
 agent/SentinelAgent.spec
+*.db

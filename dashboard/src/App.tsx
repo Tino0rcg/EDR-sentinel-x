@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, Cpu, Database, HardDrive, Monitor, AlertCircle, Server, Shield, Zap, LayoutDashboard, Settings, Bell, ChevronRight, ChevronLeft, Globe, Lock, User, LogOut, ArrowUp, ArrowDown, Clock, List, History, Mail, UserPlus, Trash2, ShieldAlert, Wifi, Info, CheckCircle2, XCircle, ShieldCheck, Battery, Eye, EyeOff, Network } from 'lucide-react';
+import { Activity, Cpu, Database, HardDrive, Monitor, AlertCircle, Server, Shield, Zap, LayoutDashboard, Settings, Bell, ChevronRight, ChevronLeft, Globe, Lock, User, LogOut, ArrowUp, ArrowDown, Clock, List, History, Mail, UserPlus, Trash2, ShieldAlert, Wifi, Info, CheckCircle2, XCircle, ShieldCheck, Battery, Eye, EyeOff, Network, Building, Smartphone, Tv } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { NetworkMapView } from './NetworkMapView';
 import { NetworkScannerView } from './NetworkScannerView';
@@ -29,8 +29,10 @@ const App = () => {
   const [metrics, setMetrics] = useState<Metric[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
   const [alerts, setAlerts] = useState<any[]>([]);
+  const [companies, setCompanies] = useState<any[]>([]);
+  const [selectedCompanyId, setSelectedCompanyId] = useState<number | 'all'>('all');
   const [selectedDevice, setSelectedDevice] = useState<string | null>(null);
-  const [view, setView] = useState<'global' | 'dashboard' | 'security' | 'users' | 'network_map' | 'network_scanner'>('global');
+  const [view, setView] = useState<'global' | 'dashboard' | 'security' | 'users' | 'companies' | 'network_map' | 'network_scanner'>('global');
   const [expandedProcs, setExpandedProcs] = useState(false);
   const [expandedConns, setExpandedConns] = useState(false);
   const [activeEngineInfo, setActiveEngineInfo] = useState<number | null>(null);
@@ -41,8 +43,23 @@ const App = () => {
   const [showLogin, setShowLogin] = useState(false);
 
   const safeFetch = async (url: string) => { try { const res = await fetch(url); return res.ok ? await res.json() : null; } catch (e) { return null; } };
-  const fetchAlerts = async () => { const d = await safeFetch(`${API_URL}/alerts`); if (d) setAlerts(d); };
-  const fetchDevices = async () => { const d = await safeFetch(`${API_URL}/devices`); if (Array.isArray(d)) { setDevices(d); } };
+  
+  const fetchCompanies = async () => {
+    const d = await safeFetch(`${API_URL}/companies`);
+    if (Array.isArray(d)) setCompanies(d);
+  };
+
+  const fetchAlerts = async () => {
+    const url = selectedCompanyId === 'all' ? `${API_URL}/alerts` : `${API_URL}/alerts?company_id=${selectedCompanyId}`;
+    const d = await safeFetch(url);
+    if (d) setAlerts(d);
+  };
+
+  const fetchDevices = async () => {
+    const url = selectedCompanyId === 'all' ? `${API_URL}/devices` : `${API_URL}/devices?company_id=${selectedCompanyId}`;
+    const d = await safeFetch(url);
+    if (Array.isArray(d)) { setDevices(d); }
+  };
   
   const fetchMetrics = async () => {
     if (!isAuthenticated || !selectedDevice) return;
@@ -69,10 +86,25 @@ const App = () => {
       } catch(e) {}
   };
 
-  useEffect(() => { if (isAuthenticated) { fetchDevices(); fetchAlerts(); const i = setInterval(() => { fetchDevices(); fetchAlerts(); }, 3000); return () => clearInterval(i); } }, [isAuthenticated]);
+  useEffect(() => { 
+    if (isAuthenticated) { 
+      fetchDevices(); 
+      fetchAlerts(); 
+      fetchCompanies(); 
+      const i = setInterval(() => { 
+        fetchDevices(); 
+        fetchAlerts(); 
+        fetchCompanies(); 
+      }, 3000); 
+      return () => clearInterval(i); 
+    } 
+  }, [isAuthenticated, selectedCompanyId]);
+
   useEffect(() => {
     if (devices.length > 0 && !selectedDevice) {
       setSelectedDevice(devices[0].hostname);
+    } else if (devices.length === 0) {
+      setSelectedDevice(null);
     }
   }, [devices, selectedDevice]);
   useEffect(() => { if (isAuthenticated && selectedDevice) { fetchMetrics(); const i = setInterval(fetchMetrics, 2000); return () => clearInterval(i); } }, [selectedDevice, isAuthenticated]);
@@ -87,6 +119,55 @@ const App = () => {
   const licenseActive = inventory.license_active !== false;
 
   const predictiveAlerts = Array.isArray(alerts) ? alerts.filter(a => a.level === 'PREDICTIVE') : [];
+  // Cuentas agregadas de dispositivos descubiertos en la red local
+  const discoveredDevicesList: any[] = [];
+  const seenIps = new Set<string>();
+
+  devices.forEach(d => {
+    if (d.hostname && !seenIps.has(d.hostname)) {
+      discoveredDevicesList.push({
+        hostname: d.hostname,
+        ip: "Host del Agente",
+        mac: d.status === 'ONLINE' ? "Agente EDR Activo" : "Agente EDR Inactivo",
+        type: "PC/Laptop",
+        status: d.status,
+        isAgent: true,
+        quarantine: d.quarantine
+      });
+      seenIps.add(d.hostname);
+    }
+  });
+
+  devices.forEach(d => {
+    let netMap = d.network_map;
+    if (typeof netMap === 'string') {
+      try { netMap = JSON.parse(netMap); } catch(e) { netMap = []; }
+    }
+    if (Array.isArray(netMap)) {
+      netMap.forEach((netDev: any) => {
+        const key = netDev.ip || netDev.hostname;
+        if (key && !seenIps.has(key)) {
+          discoveredDevicesList.push({
+            hostname: netDev.hostname || netDev.ip,
+            ip: netDev.ip,
+            mac: netDev.mac,
+            type: netDev.type || "Generic",
+            status: "ONLINE",
+            isAgent: false,
+            quarantine: 0
+          });
+          seenIps.add(key);
+        }
+      });
+    }
+  });
+
+  const filteredDiscoveredDevices = discoveredDevicesList.filter(d => 
+    d?.hostname?.toLowerCase().includes(searchQuery?.toLowerCase() || '') ||
+    d?.ip?.toLowerCase().includes(searchQuery?.toLowerCase() || '') ||
+    d?.mac?.toLowerCase().includes(searchQuery?.toLowerCase() || '')
+  );
+
   const filteredDevices = devices.filter(d => d?.hostname?.toLowerCase().includes(searchQuery?.toLowerCase() || ''));
 
   const realThreats = deviceAlerts.filter(a => 
@@ -119,7 +200,31 @@ const App = () => {
     <div className="h-screen w-full text-white flex bg-[#010102] font-sans overflow-hidden">
       {/* LATERAL IZQUIERDA */}
       <aside className="w-64 bg-black/40 border-r border-white/5 p-6 flex flex-col z-20">
-        <div className="flex flex-col items-center gap-3 mb-10 text-blue-500 font-black italic text-2xl tracking-tighter"><img src="https://raw.githubusercontent.com/Tino0rcg/sentinel/main/ChatGPT%20Image%2014%20may%202026%2C%2011_28_18%20p.m..png" alt="Sentinel Logo" className="h-24 mix-blend-screen" style={{ WebkitMaskImage: 'radial-gradient(circle, white 35%, transparent 75%)', maskImage: 'radial-gradient(circle, white 35%, transparent 75%)' }} /> SENTINEL-X</div>
+        <div className="flex flex-col items-center gap-3 mb-6 text-blue-500 font-black italic text-2xl tracking-tighter"><img src="https://raw.githubusercontent.com/Tino0rcg/sentinel/main/ChatGPT%20Image%2014%20may%202026%2C%2011_28_18%20p.m..png" alt="Sentinel Logo" className="h-24 mix-blend-screen" style={{ WebkitMaskImage: 'radial-gradient(circle, white 35%, transparent 75%)', maskImage: 'radial-gradient(circle, white 35%, transparent 75%)' }} /> SENTINEL-X</div>
+        
+        {/* SELECTOR DE EMPRESA */}
+        <div className="mb-6 space-y-1 px-1">
+          <label className="text-[9px] font-black text-white/30 uppercase tracking-[0.2em]">Empresa Activa</label>
+          <div className="relative">
+            <select 
+              value={selectedCompanyId} 
+              onChange={(e) => {
+                const val = e.target.value;
+                setSelectedCompanyId(val === 'all' ? 'all' : Number(val));
+                setSelectedDevice(null);
+                setView('global');
+              }}
+              className="w-full bg-white/5 border border-white/10 p-3 rounded-xl text-xs text-white outline-none focus:border-blue-500 appearance-none cursor-pointer pr-8"
+            >
+              <option value="all" className="bg-[#0c0c0e] text-white">Todas las empresas</option>
+              {companies.map(c => (
+                <option key={c.id} value={c.id} className="bg-[#0c0c0e] text-white">{c.name}</option>
+              ))}
+            </select>
+            <div className="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-white/40 text-[10px]">▼</div>
+          </div>
+        </div>
+
         <nav className="space-y-1 mb-8">
           <NavItem icon={<Globe size={18}/>} label="Vista Global" active={view === 'global'} onClick={() => { setView('global'); setSelectedDevice(null); }} />
           <NavItem icon={<Network size={18}/>} label="Mapa de Red" active={view === 'network_map'} onClick={() => { setView('network_map'); setSelectedDevice(null); }} />
@@ -127,7 +232,10 @@ const App = () => {
           <NavItem icon={<LayoutDashboard size={18}/>} label="Dashboard" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
           <NavItem icon={<ShieldAlert size={18}/>} label="Seguridad" active={view === 'security'} onClick={() => setView('security')} badge={realThreats.length} />
           {currentUserRole === 'ADMIN' && (
-             <NavItem icon={<UserPlus size={18}/>} label="Gestión Usuarios" active={view === 'users'} onClick={() => { setView('users'); setSelectedDevice(null); }} />
+             <>
+               <NavItem icon={<Building size={18}/>} label="Gestión Empresas" active={view === 'companies'} onClick={() => { setView('companies'); setSelectedDevice(null); }} />
+               <NavItem icon={<UserPlus size={18}/>} label="Gestión Usuarios" active={view === 'users'} onClick={() => { setView('users'); setSelectedDevice(null); }} />
+             </>
           )}
         </nav>
         <div className="flex-1 overflow-y-auto space-y-1">
@@ -167,13 +275,23 @@ const App = () => {
               devices={devices} 
               onRefresh={fetchDevices} 
           />
+        ) : view === 'companies' ? (
+          <CompaniesView 
+              API_URL={API_URL} 
+              companies={companies}
+              onRefresh={fetchCompanies}
+          />
         ) : (
           <div className="flex-1 p-10 overflow-y-auto bg-[#010102]">
             <div className="max-w-6xl mx-auto">
               <header className="mb-10 flex justify-between items-end">
                  <div>
                     <div className="text-blue-500 text-[10px] font-black tracking-widest mb-1 uppercase">SISTEMA EDR ACTIVO</div>
-                    <h2 className="text-6xl font-black tracking-tighter">{view === 'global' ? 'Vista Global' : view === 'users' ? 'Gestión de Personal' : selectedDevice}</h2>
+                    <h2 className="text-6xl font-black tracking-tighter">
+                      {view === 'global' ? (
+                        selectedCompanyId === 'all' ? 'Vista Global' : `Vista: ${companies.find(c => c.id === selectedCompanyId)?.name || 'Cargando...'}`
+                      ) : view === 'users' ? 'Gestión de Personal' : selectedDevice}
+                    </h2>
                  </div>
                  {view !== 'global' && view !== 'users' && (
                  <div className="flex flex-col items-end gap-3">
@@ -194,18 +312,32 @@ const App = () => {
             {view === 'global' ? (
                <div className="space-y-8">
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-                      <div className="bg-white/5 p-6 rounded-[32px] border border-white/5 text-center shadow-lg">
-                          <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-2">Equipos Totales</p>
-                          <div className="text-4xl font-black">{devices.length}</div>
-                      </div>
+                      {selectedCompanyId === 'all' ? (
+                        <div className="bg-white/5 p-6 rounded-[32px] border border-white/5 text-center shadow-lg">
+                            <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-2">Empresas</p>
+                            <div className="text-4xl font-black">{companies.length}</div>
+                        </div>
+                      ) : (
+                        <div className="bg-white/5 p-6 rounded-[32px] border border-white/5 text-center shadow-lg">
+                            <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-2">Equipos Totales</p>
+                            <div className="text-4xl font-black">{discoveredDevicesList.length}</div>
+                        </div>
+                      )}
                       <div className="bg-white/5 p-6 rounded-[32px] border border-white/5 text-center shadow-lg">
                           <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-2 text-green-500">En Línea</p>
-                          <div className="text-4xl font-black text-green-500">{devices.filter(d => d.status === 'ONLINE').length}</div>
+                          <div className="text-4xl font-black text-green-500">{discoveredDevicesList.filter(d => d.status === 'ONLINE').length}</div>
                       </div>
-                      <div className="bg-white/5 p-6 rounded-[32px] border border-white/5 text-center shadow-lg">
-                          <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-2 text-red-500">Inactivos</p>
-                          <div className="text-4xl font-black text-red-500">{devices.filter(d => d.status === 'OFFLINE').length}</div>
-                      </div>
+                      {selectedCompanyId === 'all' ? (
+                        <div className="bg-white/5 p-6 rounded-[32px] border border-white/5 text-center shadow-lg">
+                            <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-2 text-red-500">Alertas de Red</p>
+                            <div className="text-4xl font-black text-red-500">{alerts.length}</div>
+                        </div>
+                      ) : (
+                        <div className="bg-white/5 p-6 rounded-[32px] border border-white/5 text-center shadow-lg">
+                            <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-2 text-red-500">Inactivos</p>
+                            <div className="text-4xl font-black text-red-500">{discoveredDevicesList.filter(d => d.status === 'OFFLINE').length}</div>
+                        </div>
+                      )}
                       <div className="bg-white/5 p-6 rounded-[32px] border border-white/5 text-center shadow-lg">
                           <p className="text-[10px] font-black opacity-30 uppercase tracking-widest mb-2 text-orange-500">Alertas Predictivas</p>
                           <div className="text-4xl font-black text-orange-500">{predictiveAlerts.length}</div>
@@ -231,17 +363,63 @@ const App = () => {
                   )}
 
                   <div className="bg-white/5 border border-white/5 p-8 rounded-[40px] shadow-2xl">
-                      <h3 className="text-sm font-black opacity-30 uppercase mb-6 flex items-center gap-2"><Monitor size={16}/> Flota de Equipos</h3>
+                      <h3 className="text-sm font-black opacity-30 uppercase mb-6 flex items-center gap-2"><Monitor size={16}/> Flota de Equipos en la Red</h3>
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                          {devices.map(d => (
-                              <button key={d.hostname} onClick={() => { setSelectedDevice(d.hostname); setView('dashboard'); }} className="p-4 bg-black/40 border border-white/5 rounded-2xl flex items-center justify-between hover:bg-white/5 transition-colors">
+                          {filteredDiscoveredDevices.map((d, index) => {
+                              const isAgent = d.isAgent;
+                              
+                              let deviceIcon = <Monitor size={20} className="text-blue-400" />;
+                              if (d.type === 'Server') deviceIcon = <Server size={20} className="text-purple-400" />;
+                              else if (d.type === 'Router') deviceIcon = <Globe size={20} className="text-emerald-400" />;
+                              else if (d.type === 'Mobile') deviceIcon = <Smartphone size={20} className="text-yellow-400" />;
+                              else if (d.type === 'TV') deviceIcon = <Tv size={20} className="text-pink-400" />;
+                              
+                              const content = (
                                   <div className="flex items-center gap-3">
-                                      <div className={`w-2 h-2 rounded-full ${d.status === 'ONLINE' ? 'bg-green-500' : 'bg-red-500'}`}></div>
-                                      <span className="text-sm font-bold">{d.hostname}</span>
+                                      <div className="p-2 bg-white/5 rounded-xl">
+                                          {deviceIcon}
+                                      </div>
+                                      <div className="text-left">
+                                          <div className="flex items-center gap-2">
+                                              <span className="text-sm font-bold text-white leading-tight">{d.hostname}</span>
+                                              {isAgent ? (
+                                                  <span className="text-[8px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded font-black tracking-widest uppercase">EDR</span>
+                                              ) : (
+                                                  <span className="text-[8px] bg-white/10 text-white/50 px-1.5 py-0.5 rounded font-black tracking-widest uppercase">LAN</span>
+                                              )}
+                                          </div>
+                                          <div className="text-[10px] text-white/40 mt-0.5">{d.ip} • {d.mac}</div>
+                                      </div>
                                   </div>
-                                  <ChevronRight size={16} className="text-white/20"/>
-                              </button>
-                          ))}
+                              );
+                              
+                              if (isAgent) {
+                                  return (
+                                      <button 
+                                          key={index} 
+                                          onClick={() => { setSelectedDevice(d.hostname); setView('dashboard'); }} 
+                                          className="p-4 bg-blue-500/5 hover:bg-blue-500/10 border border-blue-500/20 rounded-2xl flex items-center justify-between transition-all group outline-none"
+                                      >
+                                          {content}
+                                          <ChevronRight size={16} className="text-blue-500/40 group-hover:text-blue-500 transition-colors"/>
+                                      </button>
+                                  );
+                              } else {
+                                  return (
+                                      <button 
+                                          key={index} 
+                                          onClick={() => { setSelectedDevice(d.hostname); setView('dashboard'); }} 
+                                          className="p-4 bg-black/40 hover:bg-white/5 border border-white/5 rounded-2xl flex items-center justify-between transition-all group outline-none w-full text-left"
+                                      >
+                                          {content}
+                                          <div className="flex items-center gap-1.5 bg-green-500/10 text-green-500 px-2 py-1 rounded-xl text-[9px] font-black uppercase">
+                                              <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
+                                              Activo
+                                          </div>
+                                      </button>
+                                  );
+                              }
+                          })}
                       </div>
                   </div>
 
@@ -297,6 +475,15 @@ const App = () => {
                </div>
             ) : (
                <div className="space-y-8">
+                  {!devices.some(d => d.hostname === selectedDevice) && (
+                      <div className="bg-orange-500/10 border border-orange-500/20 p-6 rounded-[32px] flex items-center gap-4">
+                          <AlertCircle size={24} className="text-orange-500" />
+                          <div>
+                              <h4 className="text-orange-500 font-bold">Dispositivo Sin Agente EDR</h4>
+                              <p className="text-white/60 text-sm">Este es un dispositivo descubierto en la red local que no tiene instalado el agente Sentinel-X. La telemetría, el control y la monitorización avanzada no están disponibles.</p>
+                          </div>
+                      </div>
+                  )}
                   {/* MÉTRICAS TOP */}
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                     <StatCard label="CPU" value={latest?.cpu_usage} color="blue" />
@@ -746,5 +933,83 @@ const NavItem = ({ icon, label, active, onClick, badge }: any) => (
     {badge > 0 && <span className="ml-auto bg-red-600 text-[10px] px-2 py-0.5 rounded-full">{badge}</span>}
   </button>
 );
+
+const CompaniesView = ({ API_URL, companies, onRefresh }: any) => {
+    const [newName, setNewName] = useState('');
+    const [loading, setLoading] = useState(false);
+
+    const handleCreateCompany = async (e: any) => {
+        e.preventDefault();
+        if (!newName.trim()) return;
+        setLoading(true);
+        try {
+            const res = await fetch(`${API_URL}/companies`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: newName })
+            });
+            if (res.ok) {
+                setNewName('');
+                onRefresh();
+                alert("Empresa creada exitosamente");
+            } else {
+                alert("Error: La empresa probablemente ya existe.");
+            }
+        } catch(e) {
+            alert("Error de red");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleDeleteCompany = async (id: number, name: string) => {
+        if (!confirm(`¿Eliminar la empresa "${name}" definitivamente? Se borrarán todos sus dispositivos y métricas asociadas en cascada.`)) return;
+        try {
+            const res = await fetch(`${API_URL}/companies/${id}`, { method: 'DELETE' });
+            if (res.ok) onRefresh();
+        } catch(e) {}
+    };
+
+    return (
+        <div className="flex-1 p-10 overflow-y-auto bg-[#010102]">
+            <div className="max-w-6xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                <header className="mb-10">
+                    <div className="text-blue-500 text-[10px] font-black tracking-widest mb-1 uppercase">SISTEMA EDR ACTIVO</div>
+                    <h2 className="text-6xl font-black tracking-tighter">Gestión de Empresas</h2>
+                </header>
+
+                <div className="bg-white/5 border border-white/10 p-8 rounded-[40px] shadow-2xl">
+                    <h3 className="text-xl font-black mb-8 flex items-center gap-2 text-blue-500"><Building size={24}/> Registrar Nueva Empresa</h3>
+                    <form onSubmit={handleCreateCompany} className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                        <div className="md:col-span-3">
+                            <label className="text-[10px] font-black opacity-30 uppercase block mb-2">Nombre de la Empresa</label>
+                            <input type="text" required value={newName} onChange={e => setNewName(e.target.value)} className="w-full bg-black/40 border border-white/10 p-4 rounded-2xl text-sm outline-none focus:border-blue-500" placeholder="Ej. Reven inc" />
+                        </div>
+                        <button type="submit" disabled={loading} className="bg-blue-600 text-white font-black p-4 rounded-2xl hover:bg-blue-500 transition-colors shadow-lg shadow-blue-500/20 disabled:opacity-50 h-[54px] flex items-center justify-center">REGISTRAR EMPRESA</button>
+                    </form>
+                </div>
+
+                <div className="bg-white/5 border border-white/10 p-8 rounded-[40px] shadow-2xl">
+                    <h3 className="text-xl font-black mb-8 flex items-center gap-2"><Server size={24}/> Empresas Monitoreadas</h3>
+                    <div className="space-y-3">
+                        {companies.map((c: any, i: number) => (
+                            <div key={i} className="flex items-center justify-between p-5 bg-black/40 rounded-3xl border border-white/5 hover:border-white/10 transition-colors">
+                                <div>
+                                    <div className="font-bold text-lg">{c.name}</div>
+                                    <div className="flex gap-4 mt-2">
+                                        <div className="text-[10px] font-black uppercase tracking-widest text-blue-500">{c.devices_count} Agentes</div>
+                                        <div className="text-[10px] font-black uppercase tracking-widest text-red-500">{c.alerts_count} Alertas</div>
+                                    </div>
+                                </div>
+                                <button onClick={() => handleDeleteCompany(c.id, c.name)} className="w-12 h-12 rounded-2xl flex items-center justify-center bg-red-500/10 text-red-500 hover:bg-red-500 hover:text-white transition-all"><Trash2 size={20}/></button>
+                            </div>
+                        ))}
+                        {companies.length === 0 && <p className="text-center opacity-30 italic">No hay empresas registradas</p>}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
 
 export default App;

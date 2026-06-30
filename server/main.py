@@ -55,6 +55,11 @@ ENABLE_EMAILS = os.environ.get("ENABLE_EMAILS", "True").lower() == "true"
 ALERT_MEMORY = {} 
 
 # Models
+class CompanyDB(Base):
+    __tablename__ = "companies"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, unique=True, nullable=False)
+
 class UserDB(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True); email = Column(String, unique=True); hashed_password = Column(String); role = Column(String, default="USER")
@@ -62,14 +67,17 @@ class UserDB(Base):
 class DeviceDB(Base):
     __tablename__ = "devices"
     hostname = Column(String, primary_key=True); last_seen = Column(DateTime); status = Column(String); active_connections = Column(JSON); quarantine = Column(Integer, default=0); network_map = Column(JSON)
+    company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"), nullable=True)
 
 class MetricDB(Base):
     __tablename__ = "metrics"
     id = Column(Integer, primary_key=True); hostname = Column(String); cpu_usage = Column(Float); ram_usage = Column(Float); disk_usage = Column(Float); uptime = Column(String); network = Column(JSON); processes = Column(JSON); timestamp = Column(Float)
+    company_id = Column(Integer, nullable=True)
 
 class AlertDB(Base):
     __tablename__ = "alerts"
     id = Column(Integer, primary_key=True); hostname = Column(String); message = Column(String); level = Column(String); timestamp = Column(Float)
+    company_id = Column(Integer, nullable=True)
 
 try:
     Base.metadata.create_all(bind=engine)
@@ -93,12 +101,16 @@ def analyze_predictions(hostname: str):
         metrics = db.query(MetricDB).filter(MetricDB.hostname == hostname).order_by(MetricDB.timestamp.desc()).limit(20).all()
         if len(metrics) < 10: return
         
+        # Obtener el company_id del dispositivo
+        device = db.query(DeviceDB).filter(DeviceDB.hostname == hostname).first()
+        company_id = device.company_id if device else None
+        
         # Check CPU Saturation
         high_cpu_count = sum(1 for m in metrics if m.cpu_usage > 90)
         if high_cpu_count >= 15:
             mem_key = f"{hostname}_PRED_CPU"
             if time.time() - ALERT_MEMORY.get(mem_key, 0) > 86400:
-                db.add(AlertDB(hostname=hostname, message="Saturación crítica de CPU prolongada. Riesgo de cuelgue inminente.", level="PREDICTIVE", timestamp=time.time()))
+                db.add(AlertDB(hostname=hostname, message="Saturación crítica de CPU prolongada. Riesgo de cuelgue inminente.", level="PREDICTIVE", timestamp=time.time(), company_id=company_id))
                 ALERT_MEMORY[mem_key] = time.time()
                 
         # Check RAM Saturation
@@ -106,7 +118,7 @@ def analyze_predictions(hostname: str):
         if high_ram_count >= 15:
             mem_key = f"{hostname}_PRED_RAM"
             if time.time() - ALERT_MEMORY.get(mem_key, 0) > 86400:
-                db.add(AlertDB(hostname=hostname, message="Memoria RAM al límite prolongado. Riesgo de fallo (OOM).", level="PREDICTIVE", timestamp=time.time()))
+                db.add(AlertDB(hostname=hostname, message="Memoria RAM al límite prolongado. Riesgo de fallo (OOM).", level="PREDICTIVE", timestamp=time.time(), company_id=company_id))
                 ALERT_MEMORY[mem_key] = time.time()
 
         # Check Disk Growth
@@ -124,13 +136,14 @@ def analyze_predictions(hostname: str):
                 if days_to_full < 14:
                     mem_key = f"{hostname}_PRED_DISK"
                     if time.time() - ALERT_MEMORY.get(mem_key, 0) > 86400:
-                        db.add(AlertDB(hostname=hostname, message=f"El disco se llenará al 100% en aprox. {int(days_to_full)} días.", level="PREDICTIVE", timestamp=time.time()))
+                        db.add(AlertDB(hostname=hostname, message=f"El disco se llenará al 100% en aprox. {int(days_to_full)} días.", level="PREDICTIVE", timestamp=time.time(), company_id=company_id))
                         ALERT_MEMORY[mem_key] = time.time()
         db.commit()
     except Exception as e:
         print(f"Error en predicciones: {e}")
     finally:
         db.close()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
@@ -159,6 +172,25 @@ async def lifespan(app: FastAPI):
             db.commit()
         except:
             db.rollback()
+        try:
+            from sqlalchemy import text
+            db.execute(text("ALTER TABLE devices ADD COLUMN company_id INTEGER"))
+            db.commit()
+        except:
+            db.rollback()
+        try:
+            from sqlalchemy import text
+            db.execute(text("ALTER TABLE metrics ADD COLUMN company_id INTEGER"))
+            db.commit()
+        except:
+            db.rollback()
+        try:
+            from sqlalchemy import text
+            db.execute(text("ALTER TABLE alerts ADD COLUMN company_id INTEGER"))
+            db.commit()
+        except:
+            db.rollback()
+            
         if db.query(UserDB).count() == 0:
             h = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
             db.add(UserDB(email="admin@sentinel.com", hashed_password=h, role="ADMIN")); db.commit()
@@ -180,15 +212,31 @@ class Metrics(BaseModel):
     uptime: Optional[str] = "N/A"; network: Optional[Dict[str, Any]] = {}
     processes: Optional[List[Any]] = []; security_alerts: Optional[List[Any]] = []
     active_connections: Optional[List[str]] = []; timestamp: float
+    company_name: Optional[str] = None
 
 @app.post("/metrics")
 async def post_metrics(data: Metrics, background_tasks: BackgroundTasks):
     db = SessionLocal()
     try:
+        # Resolver empresa
+        company_id = None
+        cname = data.company_name or "Default Company"
+        comp = db.query(CompanyDB).filter(CompanyDB.name == cname).first()
+        if not comp:
+            comp = CompanyDB(name=cname)
+            db.add(comp)
+            db.commit()
+            db.refresh(comp)
+        company_id = comp.id
+
         d = db.query(DeviceDB).filter(DeviceDB.hostname == data.hostname).first()
-        if not d: d = DeviceDB(hostname=data.hostname); db.add(d)
-        d.status = "ONLINE"; d.last_seen = datetime.datetime.utcnow()
+        if not d:
+            d = DeviceDB(hostname=data.hostname)
+            db.add(d)
+        d.status = "ONLINE"
+        d.last_seen = datetime.datetime.utcnow()
         d.active_connections = data.active_connections
+        d.company_id = company_id
         if isinstance(data.network, dict):
             d.network_map = data.network.get("discovered_devices", [])
         is_quarantined = d.quarantine == 1
@@ -196,27 +244,21 @@ async def post_metrics(data: Metrics, background_tasks: BackgroundTasks):
         # PROCESAR AMENAZAS CON FILTRO DRÁSTICO
         for threat in data.security_alerts:
             level = threat.get('level', 'INFO')
-            
-            # 1. IGNORAR COMPLETAMENTE LAS ALERTAS INFO (RUIDO)
             if level == "INFO":
                 continue
                 
-            # 2. MEMORIA DE 1 HORA PARA AMENAZAS CRÍTICAS
             mem_key = f"{data.hostname}_{threat['desc']}"
             last_alert_time = ALERT_MEMORY.get(mem_key, 0)
-            
-            # EXCEPCIÓN: Las alertas de estado (Firewall, AV, Disco) deben ser instantáneas
             is_status_alert = any(k in threat['desc'].upper() for k in ["FIREWALL", "ANTIVIRUS", "LICENCIA", "DISCO"])
             
             if is_status_alert or (time.time() - last_alert_time > 3600): 
-                db.add(AlertDB(hostname=data.hostname, message=threat['desc'], level=level, timestamp=data.timestamp))
+                db.add(AlertDB(hostname=data.hostname, message=threat['desc'], level=level, timestamp=data.timestamp, company_id=company_id))
                 ALERT_MEMORY[mem_key] = time.time()
-                
-                # Solo correo si es CRITICAL (ya filtrado arriba)
-                background_tasks.add_task(send_email_task, f"Amenaza en {data.hostname}", threat['desc'], True)
+                background_tasks.add_task(send_email_task, f"Amenaza en {data.hostname} ({cname})", threat['desc'], True)
                 print(f"🛑 [SERVER] Alerta CRÍTICA registrada (Silencio activado por 1h)")
         
-        db.add(MetricDB(**data.dict(exclude={'security_alerts', 'active_connections'})))
+        metric_dict = data.dict(exclude={'security_alerts', 'active_connections', 'company_name'})
+        db.add(MetricDB(**metric_dict, company_id=company_id))
         if is_quarantined:
             print(f"🛡️ [QUARANTINE] Enviando bloqueo activo a {data.hostname}")
             
@@ -226,8 +268,14 @@ async def post_metrics(data: Metrics, background_tasks: BackgroundTasks):
     return {"status": "ok", "quarantine": bool(is_quarantined)}
 
 @app.get("/alerts")
-def get_alerts():
-    db = SessionLocal(); data = db.query(AlertDB).order_by(AlertDB.timestamp.desc()).limit(100).all(); db.close(); return data
+def get_alerts(company_id: Optional[int] = None):
+    db = SessionLocal()
+    query = db.query(AlertDB)
+    if company_id is not None:
+        query = query.filter(AlertDB.company_id == company_id)
+    data = query.order_by(AlertDB.timestamp.desc()).limit(100).all()
+    db.close()
+    return data
 
 @app.delete("/alerts/{alert_id}")
 def delete_alert(alert_id: int):
@@ -243,10 +291,66 @@ def delete_alert(alert_id: int):
 def clear_alerts():
     db = SessionLocal(); db.query(AlertDB).delete(); db.commit(); db.close(); return {"status": "ok"}
 
-@app.get("/devices")
-def get_devices():
+# --- COMPANIES ENDPOINTS ---
+@app.get("/companies")
+def get_companies():
     db = SessionLocal()
-    devices = db.query(DeviceDB).all()
+    companies = db.query(CompanyDB).all()
+    res = []
+    for c in companies:
+        devices_count = db.query(DeviceDB).filter(DeviceDB.company_id == c.id).count()
+        alerts_count = db.query(AlertDB).filter(AlertDB.company_id == c.id).count()
+        res.append({
+            "id": c.id,
+            "name": c.name,
+            "devices_count": devices_count,
+            "alerts_count": alerts_count
+        })
+    db.close()
+    return res
+
+@app.post("/companies")
+def create_company(data: Dict[str, str]):
+    db = SessionLocal()
+    name = data.get("name")
+    if not name:
+        db.close()
+        raise HTTPException(status_code=400, detail="Name is required")
+    existing = db.query(CompanyDB).filter(CompanyDB.name == name).first()
+    if existing:
+        db.close()
+        raise HTTPException(status_code=400, detail="Company already exists")
+    c = CompanyDB(name=name)
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    db.close()
+    return {"status": "ok", "id": c.id, "name": c.name}
+
+@app.delete("/companies/{company_id}")
+def delete_company(company_id: int):
+    db = SessionLocal()
+    c = db.query(CompanyDB).filter(CompanyDB.id == company_id).first()
+    if not c:
+        db.close()
+        raise HTTPException(status_code=404, detail="Company not found")
+    
+    # Cascade delete devices, metrics, and alerts for this company
+    db.query(AlertDB).filter(AlertDB.company_id == company_id).delete()
+    db.query(MetricDB).filter(MetricDB.company_id == company_id).delete()
+    db.query(DeviceDB).filter(DeviceDB.company_id == company_id).delete()
+    db.delete(c)
+    db.commit()
+    db.close()
+    return {"status": "ok"}
+
+@app.get("/devices")
+def get_devices(company_id: Optional[int] = None):
+    db = SessionLocal()
+    if company_id is not None:
+        devices = db.query(DeviceDB).filter(DeviceDB.company_id == company_id).all()
+    else:
+        devices = db.query(DeviceDB).all()
     now = datetime.datetime.utcnow()
     updated = False
     for d in devices:
@@ -256,8 +360,12 @@ def get_devices():
                 updated = True
     if updated:
         db.commit()
+    
     # Volver a cargar para retornar datos actualizados
-    data = db.query(DeviceDB).all()
+    if company_id is not None:
+        data = db.query(DeviceDB).filter(DeviceDB.company_id == company_id).all()
+    else:
+        data = db.query(DeviceDB).all()
     db.close()
     return data
 
