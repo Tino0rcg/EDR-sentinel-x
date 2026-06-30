@@ -155,16 +155,89 @@ def handle_quarantine(enable):
     
     CURRENT_QUARANTINE = enable
 
-def check_advanced_threats(conns_list, upload_speed, download_speed):
+def check_advanced_threats(raw_conns, upload_speed, download_speed):
     new_alerts = []
     
-    # 1. Threat Intel (Suspicious Ports)
-    suspicious_ports = {'4444', '666', '1337', '3389', '6666'}
-    for c in conns_list:
+    # 1. Threat Intel (Suspicious Ports) con Análisis Forense
+    suspicious_ports = {445, 4444, 666, 1337, 3389, 6666}
+    alerted_ports = set()
+    
+    for c in raw_conns:
         try:
-            port = c.split(':')[-1]
-            if port in suspicious_ports:
-                new_alerts.append({"level": "CRITICAL", "desc": f"CONEXIÓN SOSPECHOSA a puerto de riesgo {c}"})
+            lport = c.laddr.port if hasattr(c.laddr, 'port') else (c.laddr[1] if c.laddr else None)
+            rport = c.raddr.port if hasattr(c.raddr, 'port') else (c.raddr[1] if c.raddr else None)
+            
+            sus_port = None
+            if lport in suspicious_ports: sus_port = lport
+            elif rport in suspicious_ports: sus_port = rport
+            
+            if sus_port and sus_port not in alerted_ports:
+                alerted_ports.add(sus_port)
+                pid = c.pid
+                
+                pname = "Desconocido"
+                ppath = "N/A"
+                puser = "N/A"
+                sig_status = "No Firmado / Desconocida"
+                
+                if pid:
+                    try:
+                        p = psutil.Process(pid)
+                        pname = p.name()
+                        try: ppath = p.exe()
+                        except: pass
+                        try: puser = p.username()
+                        except: pass
+                        
+                        if ppath and ppath != "N/A":
+                            try:
+                                ps_cmd = f"(Get-AuthenticodeSignature '{ppath}').Status"
+                                ps_res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True, text=True, timeout=2)
+                                raw_sig = ps_res.stdout.strip()
+                                if raw_sig:
+                                    sig_status = raw_sig
+                            except: pass
+                    except:
+                        pass
+                else:
+                    pname = "Sistema"
+                    
+                # Contexto Especifico de Protocolo (RDP y SMB) siempre debe correr
+                extra_info = ""
+                level = "WARNING"
+                
+                if sus_port == 3389:
+                    extra_info += "\nServicio: Remote Desktop (RDP)"
+                    try:
+                        nla = run_cmd("powershell -NoProfile -Command \"(Get-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp' -Name UserAuthentication -ErrorAction SilentlyContinue).UserAuthentication\"")
+                        rdp_en = run_cmd("powershell -NoProfile -Command \"(Get-ItemProperty 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server' -Name fDenyTSConnections -ErrorAction SilentlyContinue).fDenyTSConnections\"")
+                        
+                        is_nla = "Sí" if "1" in nla else "No"
+                        is_en = "Sí" if "0" in rdp_en else "No"
+                        extra_info += f"\nRDP Habilitado: {is_en} | NLA Habilitado: {is_nla}"
+                        if is_nla == "No": level = "CRITICAL"
+                    except: pass
+                    
+                elif sus_port == 445:
+                    extra_info += "\nServicio: Server Message Block (SMB)"
+                    try:
+                        smb1 = run_cmd("powershell -NoProfile -Command \"Get-SmbServerConfiguration | Select-Object -ExpandProperty EnableSMB1Protocol\"")
+                        shares = run_cmd("powershell -NoProfile -Command \"(Get-SmbShare).Count\"")
+                        
+                        is_smb1 = "Habilitado" if "True" in smb1 else "Deshabilitado"
+                        extra_info += f"\nSMBv1: {is_smb1} | Recursos compartidos: {shares.strip()}"
+                        if "True" in smb1: level = "CRITICAL"
+                    except: pass
+                else:
+                    level = "CRITICAL"
+                    extra_info += "\nServicio: Desconocido (Riesgo Alto)"
+
+                desc = f"PUERTO RIESGOSO {sus_port} ABIERTO por {pname} (PID: {pid if pid else 'N/A'})."
+                desc += f"\nUsuario: {puser} | Ruta: {ppath}"
+                desc += f"\nFirma Digital: {sig_status}."
+                desc += extra_info
+                desc += "\nACCIÓN RECOMENDADA: Analice el nivel de exposición de este servicio."
+                new_alerts.append({"level": level, "desc": desc})
         except: pass
             
     # 2. Heurística (Powershell ofuscado)
@@ -173,7 +246,7 @@ def check_advanced_threats(conns_list, upload_speed, download_speed):
             if p.info['name'] in ['powershell.exe', 'cmd.exe'] and p.info['cmdline']:
                 cmd = ' '.join(p.info['cmdline']).lower()
                 if any(x in cmd for x in ['-enc', '-encodedcommand', 'bypass', 'hidden']):
-                    new_alerts.append({"level": "CRITICAL", "desc": "COMANDO MALICIOSO DETECTADO: PowerShell ofuscado/oculto"})
+                    new_alerts.append({"level": "CRITICAL", "desc": "COMANDO MALICIOSO DETECTADO: Se detectó PowerShell ofuscado o ejecutándose de forma oculta (Fileless Malware). ACCIÓN RECOMENDADA: Aísle el equipo, revise los scripts de inicio y detenga el proceso sospechoso."})
     except: pass
     
     # 3. Anti Brute-Force (Event ID 4625)
@@ -195,7 +268,7 @@ def check_advanced_threats(conns_list, upload_speed, download_speed):
                 print(f"Error webcam: {e}")
             new_alerts.append({
                 "level": "CRITICAL", 
-                "desc": "MÚLTIPLES INTENTOS DE LOGIN FALLIDOS: Posible ataque de fuerza bruta",
+                "desc": "MÚLTIPLES INTENTOS DE LOGIN FALLIDOS: Se detectó un posible ataque de fuerza bruta local o por Escritorio Remoto. ACCIÓN RECOMENDADA: Contacte al usuario, bloquee la cuenta temporalmente, y exija un cambio de contraseña. (Ver evidencia fotográfica si aplica).",
                 "snapshot": snapshot_data
             })
     except: pass
@@ -210,12 +283,12 @@ def check_advanced_threats(conns_list, upload_speed, download_speed):
                 
         new_usbs = current_usbs - KNOWN_USBS
         for u in new_usbs:
-            new_alerts.append({"level": "CRITICAL", "desc": f"ALERTA ALMACENAMIENTO: Nuevo disco/USB conectado ({u})"})
+            new_alerts.append({"level": "CRITICAL", "desc": f"ALERTA ALMACENAMIENTO: Nuevo disco/USB conectado ({u}). Los dispositivos USB no autorizados pueden contener BadUSB o exfiltrar datos. ACCIÓN RECOMENDADA: Si no reconoce este USB, retírelo físicamente y revise los últimos archivos copiados."})
             KNOWN_USBS.add(u)
             
         removed_usbs = KNOWN_USBS - current_usbs
         for u in removed_usbs:
-            new_alerts.append({"level": "WARNING", "desc": f"ALMACENAMIENTO EXTRAÍDO: Disco/USB desconectado ({u})"})
+            new_alerts.append({"level": "WARNING", "desc": f"ALMACENAMIENTO EXTRAÍDO: Disco/USB desconectado ({u}). Un dispositivo de almacenamiento fue removido. ACCIÓN RECOMENDADA: Verifique si el usuario estaba autorizado a extraer información física del equipo."})
             KNOWN_USBS.remove(u)
     except: pass
 
@@ -223,18 +296,23 @@ def check_advanced_threats(conns_list, upload_speed, download_speed):
     # Umbral de subida: 15 MB/s (15360 KB/s)
     # Umbral de bajada: 30 MB/s (30720 KB/s)
     if upload_speed > 15360:
-        new_alerts.append({"level": "CRITICAL", "desc": f"TRÁFICO INUSUAL (SUBIDA): Transmitiendo a {round(upload_speed/1024, 2)} MB/s. Posible exfiltración o malware."})
+        new_alerts.append({"level": "CRITICAL", "desc": f"TRÁFICO INUSUAL (SUBIDA): Transmitiendo a {round(upload_speed/1024, 2)} MB/s. Gran cantidad de datos están saliendo del equipo hacia Internet (Exfiltración). ACCIÓN RECOMENDADA: Revise qué procesos están enviando datos y aísle el equipo si es desconocido."})
     if download_speed > 30720:
-        new_alerts.append({"level": "WARNING", "desc": f"TRÁFICO INUSUAL (BAJADA): Descargando a {round(download_speed/1024, 2)} MB/s. Alto consumo de red."})
+        new_alerts.append({"level": "WARNING", "desc": f"TRÁFICO INUSUAL (BAJADA): Descargando a {round(download_speed/1024, 2)} MB/s. Consumo masivo de red entrante (Posible malware o actualización). ACCIÓN RECOMENDADA: Monitoree el tráfico para descartar descargas no autorizadas."})
 
     return new_alerts
 
-LAST_DISCOVERY_TIME = 0
 CACHED_DEVICES = []
 DNS_CACHE = {}
+MAC_VENDOR_CACHE = {}
 
 def get_vendor_by_mac(mac):
-    clean_mac = mac.replace(":", "").replace("-", "").upper()[:6]
+    clean_mac = mac.replace(":", "").replace("-", "").upper()
+    prefix = clean_mac[:6]
+    
+    if prefix in MAC_VENDOR_CACHE:
+        return MAC_VENDOR_CACHE[prefix]
+        
     OUI_DATABASE = {
         # Cisco & Network
         "00000C": "Cisco", "000142": "Cisco", "000784": "Cisco", 
@@ -252,7 +330,7 @@ def get_vendor_by_mac(mac):
         # PCs & Servers
         "001861": "Dell", "001A92": "Dell", "00219B": "Dell", "74867A": "Dell", "A41F72": "Dell",
         "001422": "Dell", "002564": "Dell", "B8AC6F": "Dell",
-        "001C25": "Intel", "001E64": "Intel", "909F43": "Intel",
+        "001C25": "Intel", "001E64": "Intel", "909F43": "Intel", "30E3A4": "Intel",
         "000C29": "VMware", "005056": "VMware",
         "00037A": "Acer", "001E68": "Acer", "001E8C": "ASUS", "002618": "ASUS",
         "001617": "MSI", "0A0027": "VirtualBox VM", "525400": "QEMU/KVM VM",
@@ -272,18 +350,28 @@ def get_vendor_by_mac(mac):
         # Huawei
         "001E10": "Huawei", "0022A1": "Huawei", "24DF6A": "Huawei", "34CDBE": "Huawei", "64167F": "Huawei", "00E0FC": "Huawei",
         
-        # Motorola
-        "000A28": "Motorola", "0015A3": "Motorola", "002091": "Motorola", "3CD0F8": "Motorola",
-        
-        # Google
-        "3C5AB4": "Google", "D8EB97": "Google", "F88FCA": "Google", "001A11": "Google",
-        
-        # Oppo, Vivo, OnePlus
         "AC83F3": "Oppo", "C8AE9C": "Oppo", "D4A148": "Oppo",
         "34E0CF": "Vivo", "702ED5": "Vivo", "807ABF": "Vivo",
         "E8B4C8": "OnePlus", "94E1AC": "OnePlus", "64A2F9": "OnePlus"
     }
-    return OUI_DATABASE.get(clean_mac, "Desconocido")
+    
+    if prefix in OUI_DATABASE:
+        MAC_VENDOR_CACHE[prefix] = OUI_DATABASE[prefix]
+        return OUI_DATABASE[prefix]
+        
+    try:
+        res = requests.get(f"https://api.maclookup.app/v2/macs/{clean_mac}", timeout=2)
+        if res.status_code == 200:
+            data = res.json()
+            vendor = data.get("company", "")
+            if vendor:
+                MAC_VENDOR_CACHE[prefix] = vendor
+                return vendor
+    except:
+        pass
+        
+    MAC_VENDOR_CACHE[prefix] = "Desconocido"
+    return "Desconocido"
 
 def query_netbios(ip):
     query = b'\xa2\x48\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x20CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x00\x00\x21\x00\x01'
@@ -693,6 +781,14 @@ def detect_device_details(ip, mac):
     is_random_mac = is_locally_administered_mac(mac)
     if is_random_mac and vendor == "Desconocido":
         vendor = "Móvil (MAC Privada)"
+        
+    if not name:
+        if vendor and vendor != "Desconocido":
+            name = f"Dispositivo {vendor}"
+        elif is_random_mac:
+            name = "Dispositivo Móvil (MAC Privada)"
+        else:
+            name = f"Dispositivo Genérico"
     
     # 3. Escaneo rápido de firmas
     ports = [22, 80, 135, 445, 631, 9100, 8008]
@@ -965,144 +1061,6 @@ def get_discovered_devices():
         
     return CACHED_DEVICES
 
-
-# ─── MONITOREO SIN AGENTE (AGENTLESS) ───────────────────────────────────────
-KNOWN_SERVICES = {
-    21:   {"name": "FTP",        "risk": "HIGH",   "desc": "Transferencia de archivos sin cifrar"},
-    22:   {"name": "SSH",        "risk": "MEDIUM",  "desc": "Acceso remoto por terminal"},
-    23:   {"name": "Telnet",     "risk": "CRITICAL","desc": "Acceso remoto SIN cifrar"},
-    25:   {"name": "SMTP",       "risk": "MEDIUM",  "desc": "Servidor de correo saliente"},
-    53:   {"name": "DNS",        "risk": "LOW",     "desc": "Resolución de nombres"},
-    80:   {"name": "HTTP",       "risk": "MEDIUM",  "desc": "Web sin cifrar"},
-    110:  {"name": "POP3",       "risk": "HIGH",   "desc": "Correo sin cifrar"},
-    135:  {"name": "RPC",        "risk": "HIGH",   "desc": "Llamadas remotas Windows"},
-    139:  {"name": "NetBIOS",    "risk": "HIGH",   "desc": "Compartición de red legacy"},
-    143:  {"name": "IMAP",       "risk": "HIGH",   "desc": "Correo entrante sin cifrar"},
-    389:  {"name": "LDAP",       "risk": "HIGH",   "desc": "Directorio activo sin cifrar"},
-    443:  {"name": "HTTPS",      "risk": "LOW",    "desc": "Web cifrada"},
-    445:  {"name": "SMB",        "risk": "CRITICAL","desc": "Compartición de archivos Windows"},
-    3306: {"name": "MySQL",     "risk": "CRITICAL","desc": "Base de datos expuesta"},
-    3389: {"name": "RDP",       "risk": "CRITICAL","desc": "Escritorio remoto expuesto"},
-    5900: {"name": "VNC",       "risk": "CRITICAL","desc": "Control remoto expuesto"},
-    6379: {"name": "Redis",     "risk": "CRITICAL","desc": "Base de datos en caché expuesta"},
-    8080: {"name": "HTTP-Alt",  "risk": "MEDIUM",  "desc": "Servidor web alternativo"},
-    8443: {"name": "HTTPS-Alt", "risk": "LOW",     "desc": "Web cifrada alternativa"},
-    9100: {"name": "Impresora", "risk": "LOW",     "desc": "Puerto de impresión directa"},
-    5432: {"name": "PostgreSQL","risk": "CRITICAL","desc": "Base de datos expuesta"},
-    27017:{"name": "MongoDB",   "risk": "CRITICAL","desc": "Base de datos NoSQL expuesta"},
-    1433: {"name": "MSSQL",     "risk": "CRITICAL","desc": "SQL Server expuesto"},
-    548:  {"name": "AFP",        "risk": "HIGH",   "desc": "Compartición de archivos Apple"},
-    631:  {"name": "IPP",        "risk": "LOW",     "desc": "Protocolo de impresión"},
-}
-
-AGENTLESS_INTERVAL = 15  # Segundos entre ciclos de monitoreo
-
-def measure_latency(ip: str) -> float | None:
-    """Returns average latency in ms or None if offline."""
-    try:
-        result = subprocess.run(
-            f"ping -n 3 -w 500 {ip}",
-            shell=True, capture_output=True, text=True, timeout=6
-        )
-        output = result.stdout
-        # Extraer tiempo promedio del ping de Windows
-        import re
-        match = re.search(r'Promedio\s*=\s*(\d+)ms|Average\s*=\s*(\d+)ms', output, re.IGNORECASE)
-        if match:
-            ms = int(match.group(1) or match.group(2))
-            return float(ms)
-        # Si hay "inaccesible" o no hay respuesta
-        if 'inaccesible' in output.lower() or 'unreachable' in output.lower() or '100%' in output:
-            return None
-        # Buscar tiempo individual si el promedio no aparece
-        match2 = re.search(r'tiempo[=<](\d+)ms|time[=<](\d+)ms', output, re.IGNORECASE)
-        if match2:
-            return float(match2.group(1) or match2.group(2))
-    except:
-        pass
-    return None
-
-def scan_ports_fast(ip: str, ports: list) -> list:
-    """Fast TCP port scanner. Returns list of {port, service, risk, desc}."""
-    open_ports = []
-    def check_port(port):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(0.4)
-            result = s.connect_ex((ip, port))
-            s.close()
-            if result == 0:
-                svc = KNOWN_SERVICES.get(port, {"name": f"Port-{port}", "risk": "LOW", "desc": "Servicio desconocido"})
-                return {"port": port, "service": svc["name"], "risk": svc["risk"], "desc": svc["desc"]}
-        except:
-            pass
-        return None
-    import concurrent.futures
-    with concurrent.futures.ThreadPoolExecutor(max_workers=30) as ex:
-        results = ex.map(check_port, ports)
-    for r in results:
-        if r:
-            open_ports.append(r)
-    return open_ports
-
-PORTS_TO_SCAN = list(KNOWN_SERVICES.keys())
-
-def agentless_monitor_loop():
-    """Continuous background thread that probes all discovered LAN computers."""
-    import concurrent.futures
-    # Get the base URL (strip /metrics from SERVER_URL)
-    base_url = SERVER_URL.replace("/metrics", "")
-    probe_url = f"{base_url}/network-probe"
-    my_hostname = socket.gethostname()
-
-    # Give agent time to boot and do first discovery
-    time.sleep(30)
-
-    while True:
-        try:
-            devices = list(CACHED_DEVICES)  # snapshot
-            if not devices:
-                time.sleep(AGENTLESS_INTERVAL)
-                continue
-
-            # Only probe PC/Laptop and Server types
-            targets = [d for d in devices if d.get("type") in ("PC/Laptop", "Server", "Generic")]
-
-            probes = []
-            def probe_device(dev):
-                ip = dev.get("ip", "")
-                if not ip:
-                    return None
-                latency = measure_latency(ip)
-                open_ports = scan_ports_fast(ip, PORTS_TO_SCAN) if latency is not None else []
-                return {
-                    "ip": ip,
-                    "hostname": dev.get("hostname"),
-                    "latency_ms": latency,
-                    "open_ports": open_ports,
-                    "mac": dev.get("mac"),
-                    "device_type": dev.get("type"),
-                    "vendor": dev.get("vendor", ""),
-                    "timestamp": time.time(),
-                    "reporter_hostname": my_hostname
-                }
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
-                results = list(ex.map(probe_device, targets))
-
-            probes = [r for r in results if r is not None]
-            if probes:
-                try:
-                    requests.post(probe_url, json=probes, timeout=5)
-                    print(f"🛰️  [Agentless] {len(probes)} dispositivos monitoreados sin agente")
-                except Exception as e:
-                    print(f"[ERROR] Agentless post: {e}")
-        except Exception as e:
-            print(f"[ERROR] agentless_monitor_loop: {e}")
-
-        time.sleep(AGENTLESS_INTERVAL)
-
-
 def get_system_audit():
     # Información amigable (Nombres comerciales reales)
     os_info = run_cmd('wmic os get Caption').replace('Caption', '').strip()
@@ -1188,21 +1146,23 @@ def get_metrics():
         
         # Conexiones activas
         conns = []
+        raw_conns = []
         try:
-            for c in psutil.net_connections(kind='inet'):
+            raw_conns = psutil.net_connections(kind='inet')
+            for c in raw_conns:
                 if c.status == 'ESTABLISHED' and c.raddr:
                     ip = c.raddr.ip if hasattr(c.raddr, 'ip') else c.raddr[0]
                     port = c.raddr.port if hasattr(c.raddr, 'port') else c.raddr[1]
                     if not ip.startswith('127.') and not ip.startswith('0.'):
                         try:
                             pname = psutil.Process(c.pid).name() if c.pid else "Unknown"
-                            conns.append(f"{pname} ➜ {ip}:{port}")
+                            conns.append(f"{pname} ➔ {ip}:{port}")
                         except:
-                            conns.append(f"Unknown ➜ {ip}:{port}")
+                            conns.append(f"Unknown ➔ {ip}:{port}")
         except: pass
 
         conns_list = list(set(conns))[:10]
-        alerts.extend(check_advanced_threats(conns_list, upload_speed, download_speed))
+        alerts.extend(check_advanced_threats(raw_conns, upload_speed, download_speed))
         
         return {
             "hostname": socket.gethostname(),
@@ -1285,6 +1245,149 @@ def ensure_firewall_rules():
 
 agent_mutex = None
 
+def ping_host(ip: str, timeout: float = 1.0):
+    """Ping using subprocess, returns latency in ms or None if unreachable."""
+    try:
+        cmd = f"ping -n 1 -w {int(timeout*1000)} {ip}"
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+        output = res.stdout
+        if "TTL=" in output or "ttl=" in output:
+            import re
+            m = re.search(r'tiempo[<=](\d+)', output, re.IGNORECASE)
+            if not m:
+                m = re.search(r'time[<=](\d+)', output, re.IGNORECASE)
+            if m:
+                return float(m.group(1))
+            return 1.0  # online but couldn't parse ms
+        return None
+    except:
+        return None
+
+def scan_ports_fast(ip: str, ports: list, timeout: float = 0.5):
+    """Scan list of ports concurrently, return list of open port dicts."""
+    open_ports = []
+    PORT_SERVICES = {
+        21: "FTP", 22: "SSH", 23: "Telnet", 25: "SMTP", 53: "DNS",
+        80: "HTTP", 110: "POP3", 135: "MS-RPC", 139: "NetBIOS",
+        143: "IMAP", 443: "HTTPS", 445: "SMB", 631: "IPP (Impresora)",
+        993: "IMAPS", 995: "POP3S", 1433: "SQL Server", 3306: "MySQL",
+        3389: "RDP", 5900: "VNC", 8080: "HTTP-Alt", 8443: "HTTPS-Alt",
+        4444: "Metasploit Shell", 1337: "Backdoor", 6666: "Backdoor",
+        9100: "Impresora JetDirect", 8008: "HTTP-Alt2", 554: "RTSP (Cámara)"
+    }
+    RISK = {
+        23: "CRITICAL", 4444: "CRITICAL", 1337: "CRITICAL", 6666: "CRITICAL",
+        3389: "HIGH", 5900: "HIGH", 445: "HIGH", 135: "MEDIUM",
+        22: "MEDIUM", 21: "MEDIUM", 80: "LOW", 443: "LOW",
+        8080: "LOW", 8443: "LOW", 53: "LOW", 631: "LOW", 9100: "LOW", 554: "INFO"
+    }
+
+    def check_port(port):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            result = s.connect_ex((ip, port))
+            s.close()
+            if result == 0:
+                return {"port": port, "service": PORT_SERVICES.get(port, "Unknown"), "risk": RISK.get(port, "LOW")}
+        except:
+            pass
+        return None
+
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+        futures = {executor.submit(check_port, p): p for p in ports}
+        for future in concurrent.futures.as_completed(futures, timeout=10):
+            result = future.result()
+            if result:
+                open_ports.append(result)
+    return sorted(open_ports, key=lambda x: x["port"])
+
+def guess_os(open_ports: list) -> str:
+    """Infer likely OS from open ports."""
+    port_nums = [p["port"] for p in open_ports]
+    if 3389 in port_nums or 135 in port_nums or 445 in port_nums:
+        return "Windows (probable)"
+    if 22 in port_nums and 80 in port_nums:
+        return "Linux/Unix (probable)"
+    if 548 in port_nums or 5900 in port_nums:
+        return "macOS (probable)"
+    if 9100 in port_nums or 631 in port_nums:
+        return "Impresora / IoT"
+    if len(port_nums) == 0:
+        return "Desconocido"
+    return "Desconocido"
+
+PROBE_INTERVAL = 15  # segundos entre ciclos de sondeo
+
+def agentless_probe_thread():
+    """Background thread that continuously probes all discovered LAN PCs."""
+    import json
+    SCAN_PORTS = [21, 22, 23, 25, 53, 80, 110, 135, 139, 143, 443, 445, 631,
+                  993, 995, 1433, 1337, 3306, 3389, 4444, 5900, 6666, 8080,
+                  8443, 9100, 8008, 554]
+    # Construir URL del servidor de sondeo
+    base = SERVER_URL.replace("/metrics", "")
+
+    print("[🔍] Hilo de Sondeo Agentless iniciado.")
+    known_targets = {}  # ip -> hostname
+
+    while True:
+        try:
+            # Obtener dispositivos desde el servidor
+            res = requests.get(f"{base}/devices", timeout=5)
+            if res.status_code == 200:
+                all_devices = res.json()
+                for dev in all_devices:
+                    agent_ip = dev.get("inventory", {}).get("local_ip")
+                    if agent_ip and agent_ip != SERVER_IP:
+                        known_targets[agent_ip] = dev.get("hostname", agent_ip)
+
+                    network_map = dev.get("network_map") or []
+                    if isinstance(network_map, str):
+                        try: network_map = json.loads(network_map)
+                        except: network_map = []
+                    for nd in network_map:
+                        ip = nd.get("ip")
+                        hostname_nd = nd.get("hostname", ip)
+                        dtype = nd.get("type", "")
+                        if not ip or ip == SERVER_IP:
+                            continue
+                        # Solo sondear PCs / Servidores (no teléfonos, TVs)
+                        if dtype and any(k in dtype.lower() for k in ["mobile", "tv", "television", "router", "gateway", "phone", "móvil", "telefon"]):
+                            continue
+                        known_targets[ip] = hostname_nd
+
+            for ip, hostname in list(known_targets.items()):
+                try:
+                    ping_ms = ping_host(ip)
+                    open_ports = []
+                    if ping_ms is not None:  # solo escanear si está online
+                        open_ports = scan_ports_fast(ip, SCAN_PORTS, timeout=0.4)
+                    os_guess = guess_os(open_ports) if ping_ms else "Offline"
+
+                    probe_data = {
+                        "target_ip": ip,
+                        "target_hostname": hostname,
+                        "probed_by": socket.gethostname(),
+                        "ping_ms": ping_ms,
+                        "open_ports": open_ports,
+                        "os_guess": os_guess,
+                        "company_name": COMPANY_NAME,
+                        "timestamp": time.time()
+                    }
+                    requests.post(f"{base}/network-probe", json=probe_data, timeout=5)
+                    status = f"{ping_ms:.0f}ms" if ping_ms else "OFFLINE"
+                    print(f"[🔍] Sondeo {ip} ({hostname}): {status} | {len(open_ports)} puertos abiertos | {os_guess}")
+                except Exception as e:
+                    pass
+
+        except Exception as e:
+            print(f"[ERROR] Hilo de sondeo: {e}")
+
+        time.sleep(PROBE_INTERVAL)
+
+
 def main():
     global agent_mutex
     agent_mutex = check_single_instance()
@@ -1307,10 +1410,9 @@ def main():
     else:
         print("[+] Agente ejecutándose en modo USUARIO (sin persistencia).")
 
-    # Lanzar hilo de monitoreo sin agente
-    agentless_thread = threading.Thread(target=agentless_monitor_loop, daemon=True)
-    agentless_thread.start()
-    print("[+] Hilo de monitoreo sin agente (Agentless) iniciado.")
+    # Iniciar hilo de sondeo agentless en segundo plano
+    probe_thread = threading.Thread(target=agentless_probe_thread, daemon=True)
+    probe_thread.start()
 
     while True:
         try:
@@ -1330,3 +1432,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

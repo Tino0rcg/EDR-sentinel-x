@@ -18,3 +18,7 @@ dashboard/.env*
 agent/build/
 agent/SentinelAgent.spec
 *.db
+
+agent/*.spec
+agent/dist/
+agent/*.exe

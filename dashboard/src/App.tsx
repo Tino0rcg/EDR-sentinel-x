@@ -1,9 +1,383 @@
-import React, { useEffect, useState } from 'react';
-import { Activity, Cpu, Database, HardDrive, Monitor, AlertCircle, Server, Shield, Zap, LayoutDashboard, Settings, Bell, ChevronRight, ChevronLeft, Globe, Lock, User, LogOut, ArrowUp, ArrowDown, Clock, List, History, Mail, UserPlus, Trash2, ShieldAlert, Wifi, Info, CheckCircle2, XCircle, ShieldCheck, Battery, Eye, EyeOff, Network, Building, Smartphone, Tv } from 'lucide-react';
-import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
+import { Activity, Cpu, Database, HardDrive, Monitor, AlertCircle, Server, Shield, Zap, LayoutDashboard, Settings, Bell, ChevronRight, ChevronLeft, Globe, Lock, User, LogOut, ArrowUp, ArrowDown, Clock, List, History, Mail, UserPlus, Trash2, ShieldAlert, Wifi, Info, CheckCircle2, XCircle, ShieldCheck, Battery, Eye, EyeOff, Network, Building, Smartphone, Tv, Radio, Terminal, Layers, Triangle } from 'lucide-react';
+import { AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine } from 'recharts';
 import { NetworkMapView } from './NetworkMapView';
 import { NetworkScannerView } from './NetworkScannerView';
-import { AgentlessMonitorView } from './AgentlessMonitorView';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AGENTLESS MONITOR VIEW — monitoreo de red avanzado para PCs sin agente
+// ─────────────────────────────────────────────────────────────────────────────
+const RISK_COLORS: Record<string, string> = {
+  CRITICAL: '#ef4444',
+  HIGH: '#f97316',
+  MEDIUM: '#eab308',
+  LOW: '#22c55e',
+  INFO: '#3b82f6',
+};
+
+const RISK_BG: Record<string, string> = {
+  CRITICAL: 'bg-red-500/10 border-red-500/30 text-red-400',
+  HIGH: 'bg-orange-500/10 border-orange-500/30 text-orange-400',
+  MEDIUM: 'bg-yellow-500/10 border-yellow-500/30 text-yellow-400',
+  LOW: 'bg-green-500/10 border-green-500/30 text-green-400',
+  INFO: 'bg-blue-500/10 border-blue-500/30 text-blue-400',
+};
+
+function PulseRing({ color, size = 40 }: { color: string; size?: number }) {
+  return (
+    <div className="relative flex items-center justify-center" style={{ width: size, height: size }}>
+      <div className="absolute inset-0 rounded-full animate-ping opacity-20" style={{ backgroundColor: color }} />
+      <div className="absolute inset-1 rounded-full animate-ping opacity-10" style={{ backgroundColor: color, animationDelay: '0.3s' }} />
+      <div className="rounded-full" style={{ width: size * 0.4, height: size * 0.4, backgroundColor: color }} />
+    </div>
+  );
+}
+
+function LatencyGauge({ value }: { value: number | null }) {
+  const good = value !== null && value < 10;
+  const ok = value !== null && value >= 10 && value < 50;
+  const bad = value !== null && value >= 50 && value < 150;
+  const terrible = value !== null && value >= 150;
+  const offline = value === null;
+
+  const color = offline ? '#6b7280' : good ? '#22c55e' : ok ? '#3b82f6' : bad ? '#f97316' : '#ef4444';
+  const label = offline ? 'OFFLINE' : good ? 'ÓPTIMA' : ok ? 'BUENA' : bad ? 'DEGRADADA' : 'CRÍTICA';
+  const pct = offline ? 0 : Math.min(100, (value! / 200) * 100);
+
+  return (
+    <div className="flex flex-col items-center gap-3">
+      <div className="relative w-36 h-36">
+        <svg viewBox="0 0 120 120" className="w-full h-full -rotate-90">
+          <circle cx="60" cy="60" r="50" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="10" />
+          <circle
+            cx="60" cy="60" r="50" fill="none"
+            stroke={color} strokeWidth="10"
+            strokeDasharray={`${2 * Math.PI * 50 * pct / 100} ${2 * Math.PI * 50 * (1 - pct / 100)}`}
+            strokeLinecap="round"
+            style={{ transition: 'stroke-dasharray 0.6s ease, stroke 0.4s ease' }}
+          />
+        </svg>
+        <div className="absolute inset-0 flex flex-col items-center justify-center">
+          <span className="text-2xl font-black" style={{ color }}>{offline ? '—' : `${value?.toFixed(0)}`}</span>
+          {!offline && <span className="text-[9px] font-black opacity-40 uppercase">ms</span>}
+        </div>
+      </div>
+      <span className="text-[10px] font-black uppercase tracking-widest" style={{ color }}>{label}</span>
+    </div>
+  );
+}
+
+function PortBadge({ port, service, risk }: { port: number; service: string; risk: string }) {
+  const color = RISK_COLORS[risk] || '#22c55e';
+  const bg = RISK_BG[risk] || RISK_BG.LOW;
+  return (
+    <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-bold ${bg}`} style={{ borderColor: `${color}30` }}>
+      <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: color }} />
+      <span className="font-black">{port}</span>
+      <span className="opacity-60 font-medium">{service}</span>
+      {(risk === 'CRITICAL' || risk === 'HIGH') && (
+        <span className="ml-1 text-[9px] font-black uppercase animate-pulse">⚠</span>
+      )}
+    </div>
+  );
+}
+
+function AgentlessMonitorView({ deviceInfo, apiUrl, forceOnline }: { deviceInfo: any; apiUrl: string; forceOnline?: boolean }) {
+  const [probeHistory, setProbeHistory] = useState<any[]>([]);
+  const [latestProbe, setLatestProbe] = useState<any | null>(null);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [isLive, setIsLive] = useState(true);
+  const intervalRef = useRef<any>(null);
+
+  const fetchProbes = useCallback(async () => {
+    if (!deviceInfo?.ip) return;
+    try {
+      const res = await fetch(`${apiUrl}/network-probe/${encodeURIComponent(deviceInfo.ip)}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) {
+        setProbeHistory(data.slice(-40));
+        setLatestProbe(data[data.length - 1]);
+        setLastUpdated(new Date());
+      }
+    } catch {}
+  }, [deviceInfo?.ip, apiUrl]);
+
+  useEffect(() => {
+    fetchProbes();
+    if (isLive) {
+      intervalRef.current = setInterval(fetchProbes, 5000);
+    }
+    return () => clearInterval(intervalRef.current);
+  }, [fetchProbes, isLive]);
+
+  const chartData = probeHistory.map((p, i) => ({
+    i,
+    ms: p.ping_ms !== null ? parseFloat(p.ping_ms?.toFixed(1)) : null,
+    time: new Date(p.timestamp * 1000).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+  }));
+
+  const avgMs = probeHistory.length > 0
+    ? probeHistory.filter(p => p.ping_ms !== null).reduce((a, b) => a + (b.ping_ms || 0), 0) / Math.max(1, probeHistory.filter(p => p.ping_ms !== null).length)
+    : null;
+
+  const maxMs = probeHistory.length > 0 ? Math.max(...probeHistory.map(p => p.ping_ms || 0)) : null;
+  const lossCount = probeHistory.filter(p => p.ping_ms === null).length;
+  const lossPct = probeHistory.length > 0 ? ((lossCount / probeHistory.length) * 100).toFixed(0) : '0';
+
+  const openPorts: any[] = latestProbe?.open_ports || [];
+  const criticalPorts = openPorts.filter(p => p.risk === 'CRITICAL' || p.risk === 'HIGH');
+  const safePorts = openPorts.filter(p => p.risk !== 'CRITICAL' && p.risk !== 'HIGH');
+  const osGuess = latestProbe?.os_guess || 'Analizando...';
+  const isOnline = forceOnline || (latestProbe?.ping_ms !== null && latestProbe?.ping_ms !== undefined);
+
+  if (!deviceInfo?.ip) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 opacity-30">
+        <Radio size={48} className="mb-4" />
+        <p className="font-black uppercase tracking-widest text-sm">Sin IP conocida para este dispositivo</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* HEADER BAR */}
+      <div className="bg-gradient-to-r from-cyan-500/10 via-blue-500/10 to-purple-500/10 border border-cyan-500/20 rounded-[32px] p-6 flex items-center justify-between">
+        <div className="flex items-center gap-4">
+          <div className="relative">
+            <div className="w-14 h-14 rounded-2xl bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center">
+              <Radio size={28} className="text-cyan-400" />
+            </div>
+            {isOnline && (
+              <div className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-green-500 border-2 border-black animate-pulse" />
+            )}
+          </div>
+          <div>
+            <h3 className="text-xl font-black text-white">{deviceInfo.hostname}</h3>
+            <p className="text-cyan-400/80 text-sm font-bold">{deviceInfo.ip} · {deviceInfo.mac}</p>
+            <p className="text-white/30 text-xs font-bold uppercase tracking-widest mt-0.5">{osGuess}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-4">
+          <div className={`flex items-center gap-2 px-4 py-2 rounded-2xl border font-black text-sm ${isOnline ? 'bg-green-500/10 border-green-500/30 text-green-400' : 'bg-red-500/10 border-red-500/30 text-red-400'}`}>
+            <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`} />
+            {isOnline ? 'EN LÍNEA' : 'FUERA DE LÍNEA'}
+          </div>
+          <button
+            onClick={() => setIsLive(l => !l)}
+            className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-xs font-black transition-all ${isLive ? 'bg-blue-500/10 border-blue-500/30 text-blue-400' : 'bg-white/5 border-white/10 text-white/40'}`}
+          >
+            <Activity size={14} />
+            {isLive ? 'EN VIVO' : 'PAUSADO'}
+          </button>
+          {lastUpdated && (
+            <span className="text-[10px] font-black text-white/20 uppercase">
+              Act. {lastUpdated.toLocaleTimeString()}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* STATS ROW */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {[
+          { label: 'Latencia Actual', value: latestProbe?.ping_ms != null ? `${latestProbe.ping_ms.toFixed(0)} ms` : '—', sub: 'Último Ping', color: '#22c55e', icon: <Zap size={20}/> },
+          { label: 'Latencia Promedio', value: avgMs != null ? `${avgMs.toFixed(0)} ms` : '—', sub: `${probeHistory.length} muestras`, color: '#3b82f6', icon: <Activity size={20}/> },
+          { label: 'Pérdida de Paquetes', value: `${lossPct}%`, sub: `${lossCount} perdidos`, color: lossPct === '0' ? '#22c55e' : '#ef4444', icon: <XCircle size={20}/> },
+          { label: 'Puertos Abiertos', value: openPorts.length.toString(), sub: `${criticalPorts.length} críticos`, color: criticalPorts.length > 0 ? '#ef4444' : '#22c55e', icon: <Terminal size={20}/> },
+        ].map((s, i) => (
+          <div key={i} className="bg-white/5 border border-white/5 rounded-[28px] p-5 hover:border-white/10 transition-all group">
+            <div className="flex items-center gap-2 mb-3">
+              <div className="p-2 rounded-xl" style={{ backgroundColor: `${s.color}15` }}>
+                <div style={{ color: s.color }}>{s.icon}</div>
+              </div>
+              <p className="text-[10px] font-black uppercase tracking-widest opacity-30">{s.label}</p>
+            </div>
+            <p className="text-3xl font-black mt-1" style={{ color: s.color }}>{s.value}</p>
+            <p className="text-[10px] opacity-30 mt-1 font-bold uppercase">{s.sub}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* LATENCY CHART + GAUGE */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        <div className="md:col-span-2 bg-white/5 border border-white/5 rounded-[32px] p-6 hover:border-cyan-500/20 transition-all">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h4 className="font-black text-white">Latencia en Tiempo Real</h4>
+              <p className="text-xs opacity-30 font-bold uppercase mt-0.5">Historial de Ping · Últimos {probeHistory.length} sondeos</p>
+            </div>
+            {maxMs && <span className="text-xs font-black bg-white/5 px-3 py-1 rounded-full text-white/40">Pico: {maxMs.toFixed(0)}ms</span>}
+          </div>
+          {chartData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={200}>
+              <AreaChart data={chartData} margin={{ left: -20, right: 10, top: 5, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="latGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#06b6d4" stopOpacity={0} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" />
+                <XAxis dataKey="time" tick={{ fill: 'rgba(255,255,255,0.2)', fontSize: 9, fontWeight: 700 }} interval="preserveStartEnd" />
+                <YAxis tick={{ fill: 'rgba(255,255,255,0.2)', fontSize: 9 }} />
+                <Tooltip
+                  contentStyle={{ background: '#0a0a0f', border: '1px solid rgba(6,182,212,0.3)', borderRadius: 16, fontSize: 12, fontWeight: 700 }}
+                  formatter={(v: any) => v !== null ? [`${v} ms`, 'Latencia'] : ['Timeout', 'Estado']}
+                  labelStyle={{ color: 'rgba(255,255,255,0.4)', fontSize: 10 }}
+                />
+                <ReferenceLine y={50} stroke="rgba(239,68,68,0.3)" strokeDasharray="4 4" label={{ value: '50ms', fill: 'rgba(239,68,68,0.4)', fontSize: 9 }} />
+                <Area type="monotone" dataKey="ms" stroke="#06b6d4" strokeWidth={2} fill="url(#latGrad)" dot={false} connectNulls={false} />
+              </AreaChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-48 flex flex-col items-center justify-center opacity-20">
+              <Radio size={32} className="mb-3" />
+              <p className="text-sm font-black uppercase">Esperando datos de sondeo...</p>
+              <p className="text-xs mt-1">El agente enviará datos en ~15 segundos</p>
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white/5 border border-white/5 rounded-[32px] p-6 flex flex-col items-center justify-center gap-4 hover:border-cyan-500/20 transition-all">
+          <p className="text-[10px] font-black uppercase tracking-widest opacity-30">Calidad de Conexión</p>
+          <LatencyGauge value={latestProbe?.ping_ms ?? null} />
+          <div className="w-full pt-4 border-t border-white/5 space-y-2">
+            {[
+              { label: 'Sistema Operativo', value: osGuess },
+              { label: 'Sondeado por', value: latestProbe?.probed_by || '—' },
+              { label: 'Último sondeo', value: latestProbe ? new Date(latestProbe.timestamp * 1000).toLocaleTimeString() : '—' },
+            ].map((r, i) => (
+              <div key={i} className="flex justify-between text-xs">
+                <span className="opacity-30 font-bold uppercase">{r.label}</span>
+                <span className="font-black text-right max-w-[120px] truncate">{r.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* PORT SECURITY AUDIT */}
+      <div className="bg-white/5 border border-white/5 rounded-[32px] p-6 hover:border-purple-500/20 transition-all">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h4 className="font-black text-white flex items-center gap-2">
+              <Layers size={18} className="text-purple-400" />
+              Auditoría de Puertos y Servicios
+            </h4>
+            <p className="text-xs opacity-30 font-bold uppercase mt-0.5">
+              {openPorts.length} servicios detectados · Escaneo automático cada 15s
+            </p>
+          </div>
+          {criticalPorts.length > 0 && (
+            <div className="flex items-center gap-2 px-4 py-2 rounded-2xl bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-black animate-pulse">
+              <AlertCircle size={14} />
+              {criticalPorts.length} PUERTOS DE RIESGO
+            </div>
+          )}
+        </div>
+
+        {openPorts.length === 0 ? (
+          <div className="py-12 flex flex-col items-center opacity-20">
+            {isOnline ? (
+              <>
+                <ShieldCheck size={36} className="mb-3 text-green-500" />
+                <p className="font-black uppercase text-sm">No se detectaron puertos abiertos</p>
+                <p className="text-xs mt-1">Este dispositivo tiene una superficie de ataque mínima</p>
+              </>
+            ) : (
+              <>
+                <XCircle size={36} className="mb-3" />
+                <p className="font-black uppercase text-sm">Dispositivo offline — sin datos de puertos</p>
+              </>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {criticalPorts.length > 0 && (
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-widest text-red-400 mb-3 flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                  Puertos de Alto Riesgo
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {criticalPorts.map((p, i) => (
+                    <PortBadge key={i} port={p.port} service={p.service} risk={p.risk} />
+                  ))}
+                </div>
+              </div>
+            )}
+            {safePorts.length > 0 && (
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-widest text-white/20 mb-3">
+                  Servicios Normales
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {safePorts.map((p, i) => (
+                    <PortBadge key={i} port={p.port} service={p.service} risk={p.risk} />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* RADAR VISUAL — connectivity timeline */}
+      <div className="bg-white/5 border border-white/5 rounded-[32px] p-6 hover:border-green-500/20 transition-all">
+        <h4 className="font-black text-white mb-2 flex items-center gap-2">
+          <Globe size={18} className="text-green-400" />
+          Timeline de Conectividad
+        </h4>
+        <p className="text-[10px] font-black uppercase tracking-widest opacity-20 mb-5">
+          Cada bloque = 1 sondeo · Verde = online · Rojo = timeout
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          {probeHistory.map((p, i) => {
+            const online = p.ping_ms !== null;
+            const ms = p.ping_ms;
+            const opacity = online
+              ? ms < 10 ? 'opacity-100' : ms < 50 ? 'opacity-80' : ms < 150 ? 'opacity-60' : 'opacity-40'
+              : 'opacity-100';
+            const color = online
+              ? ms < 10 ? 'bg-green-500' : ms < 50 ? 'bg-blue-500' : ms < 150 ? 'bg-orange-500' : 'bg-red-500'
+              : 'bg-red-900';
+            return (
+              <div
+                key={i}
+                title={online ? `${ms?.toFixed(0)}ms · ${new Date(p.timestamp * 1000).toLocaleTimeString()}` : `TIMEOUT · ${new Date(p.timestamp * 1000).toLocaleTimeString()}`}
+                className={`w-5 h-5 rounded-md ${color} ${opacity} cursor-pointer transition-all hover:scale-125`}
+              />
+            );
+          })}
+          {probeHistory.length === 0 && (
+            <div className="flex items-center gap-2 opacity-20">
+              <div className="w-5 h-5 rounded-md bg-white/10 animate-pulse" />
+              <span className="text-xs font-black uppercase">Esperando primer sondeo...</span>
+            </div>
+          )}
+        </div>
+        <div className="flex gap-5 mt-4 text-[10px] font-black uppercase opacity-40">
+          {[
+            { color: 'bg-green-500', label: '<10ms Óptima' },
+            { color: 'bg-blue-500', label: '<50ms Buena' },
+            { color: 'bg-orange-500', label: '<150ms Lenta' },
+            { color: 'bg-red-500', label: '>150ms Crítica' },
+            { color: 'bg-red-900', label: 'Timeout' },
+          ].map((l, i) => (
+            <div key={i} className="flex items-center gap-1.5">
+              <div className={`w-3 h-3 rounded ${l.color}`} />
+              {l.label}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 
 interface DiscoveredDevice {
   ip: string;
@@ -485,124 +859,99 @@ const App = () => {
                      {deviceAlerts.length === 0 && <div className="py-20 text-center opacity-20 italic">No hay registros de seguridad.</div>}
                   </div>
                </div>
-            ) : (
-               <div className="space-y-8">
-                  {!devices.some(d => d.hostname === selectedDevice) ? (
-                      (() => {
-                          const devInfo = discoveredDevicesList.find(d => d.hostname === selectedDevice);
-                          if (!devInfo) return null;
-                          return (
-                              <AgentlessMonitorView
-                                  device={{ hostname: devInfo.hostname, ip: devInfo.ip, mac: devInfo.mac || '', type: devInfo.type || 'PC/Laptop' }}
-                                  API_URL={API_URL}
-                              />
-                          );
-                      })()
-                  ) : (
-                  <>
-                  {/* MÉTRICAS TOP */}
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-                    <StatCard label="CPU" value={latest?.cpu_usage} color="blue" />
-                    <StatCard label="RAM" value={latest?.ram_usage} color="purple" />
-                    <StatCard label="DISCO" value={latest?.disk_usage} color="orange" />
-                    <div className="bg-white/5 border border-white/5 rounded-[32px] p-6 flex flex-col justify-around text-center">
-                       <div><p className="text-[9px] font-black opacity-20 mb-1 uppercase">Seguridad</p><span className={`text-xl font-black ${realThreats.length > 0 || !fwActive || !avActive ? 'text-red-500 animate-pulse' : 'text-green-500'}`}>{realThreats.length > 0 || !fwActive || !avActive ? 'REVISIÓN' : 'ÓPTIMO'}</span></div>
-                       <div className="pt-3 border-t border-white/5"><p className="text-[9px] font-black opacity-20 mb-1 uppercase">Estado PC</p><span className={`text-xl font-black ${latest?.cpu_usage > 90 ? 'text-orange-500' : 'text-blue-400'}`}>{latest?.cpu_usage > 90 ? 'CRÍTICO' : 'ESTABLE'}</span></div>
-                    </div>
-                  </div>
-
-                  {/* ANCHO DE BANDA EN TIEMPO REAL */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      <div className="bg-white/5 border border-white/5 rounded-[32px] p-6 flex items-center justify-between shadow-lg relative overflow-hidden group hover:border-blue-500/30 transition-all">
-                          <div className="flex items-center gap-4">
-                              <div className="w-12 h-12 bg-blue-500/10 rounded-2xl flex items-center justify-center text-blue-400 group-hover:scale-110 transition-transform">
-                                  <ArrowDown size={24} />
-                              </div>
-                              <div>
-                                  <p className="text-[10px] font-black opacity-30 uppercase tracking-widest">Tráfico de Bajada (Download)</p>
-                                  <h4 className="text-3xl font-black mt-1 text-white">{inventory.download_speed || '0.0 KB/s'}</h4>
-                              </div>
-                          </div>
-                          <div className="text-[10px] font-black px-3 py-1 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
-                              RECIBIENDO
-                          </div>
-                      </div>
-                      <div className="bg-white/5 border border-white/5 rounded-[32px] p-6 flex items-center justify-between shadow-lg relative overflow-hidden group hover:border-purple-500/30 transition-all">
-                          <div className="flex items-center gap-4">
-                              <div className="w-12 h-12 bg-purple-500/10 rounded-2xl flex items-center justify-center text-purple-400 group-hover:scale-110 transition-transform">
-                                  <ArrowUp size={24} />
-                              </div>
-                              <div>
-                                  <p className="text-[10px] font-black opacity-30 uppercase tracking-widest">Tráfico de Subida (Upload)</p>
-                                  <h4 className="text-3xl font-black mt-1 text-white">{inventory.upload_speed || '0.0 KB/s'}</h4>
-                              </div>
-                          </div>
-                          <div className="text-[10px] font-black px-3 py-1 rounded-full bg-purple-500/10 text-purple-400 border border-purple-500/20">
-                              ENVIANDO
-                          </div>
-                      </div>
-                  </div>
-
-                  {/* GRÁFICA */}
-                  <div className="bg-white/5 border border-white/5 rounded-[40px] p-10 h-[320px]">
-                     <h3 className="font-black mb-8 flex items-center gap-2"><Activity size={20}/> Historial de Rendimiento</h3>
-                     <ResponsiveContainer width="100%" height="80%">
-                         <AreaChart data={metrics}>
-                             <Tooltip 
-                                 contentStyle={{ backgroundColor: 'rgba(0,0,0,0.8)', borderColor: 'rgba(255,255,255,0.1)', borderRadius: '16px', color: '#fff' }}
-                                 itemStyle={{ fontSize: '12px', fontWeight: '900' }}
-                                 labelStyle={{ display: 'none' }}
-                                 formatter={(value: number, name: string) => [`${value}%`, name === 'cpu_usage' ? 'CPU' : 'RAM']}
-                             />
-                             <Area type="monotone" dataKey="cpu_usage" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.1} strokeWidth={4} />
-                             <Area type="monotone" dataKey="ram_usage" stroke="#a855f7" fill="transparent" strokeWidth={4} />
-                         </AreaChart>
-                     </ResponsiveContainer>
-                  </div>
-
-                  {/* PROCESOS Y RED */}
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 pb-10">
-                     <div className="bg-white/5 border border-white/5 rounded-[40px] p-8">
-                         <h3 className="text-xs font-black opacity-30 mb-6 uppercase flex items-center gap-2"><List size={14}/> Procesos Top</h3>
-                         <div className="space-y-2">{(expandedProcs ? latest?.processes : latest?.processes?.slice(0, 5))?.map((p:any, i:number) => (
-                            <div key={i} className="flex justify-between p-4 bg-white/5 rounded-2xl border border-white/5 text-xs font-bold"><span>{p.name}</span><span className="text-blue-500">{p.cpu.toFixed(1)}%</span></div>
-                         ))}
-                         {latest?.processes && latest.processes.length > 5 && (
-                             <button onClick={() => setExpandedProcs(!expandedProcs)} className="w-full mt-2 p-3 text-[10px] font-black uppercase tracking-widest text-white/30 hover:text-white hover:bg-white/5 rounded-xl transition-colors border border-transparent hover:border-white/10">
-                                 {expandedProcs ? 'Ocultar Lista' : `Expandir ${latest.processes.length - 5} Más`}
-                             </button>
-                         )}
+                ) : (
+                   <div className="space-y-8">
+                     {devices.some(d => d.hostname === selectedDevice) && (
+                       <div className="space-y-8 mb-10">
+                         {/* MÉTRICAS TOP */}
+                         <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                           <StatCard label="CPU" value={latest?.cpu_usage} color="blue" />
+                           <StatCard label="RAM" value={latest?.ram_usage} color="purple" />
+                           <StatCard label="DISCO" value={latest?.disk_usage} color="orange" />
+                           <div className="bg-white/5 border border-white/5 rounded-[32px] p-6 flex flex-col justify-around text-center">
+                              <div><p className="text-[9px] font-black opacity-20 mb-1 uppercase">Seguridad</p><span className={`text-xl font-black ${realThreats.length > 0 || !fwActive || !avActive ? 'text-red-500 animate-pulse' : 'text-green-500'}`}>{realThreats.length > 0 || !fwActive || !avActive ? 'REVISIÓN' : 'ÓPTIMO'}</span></div>
+                              <div className="pt-3 border-t border-white/5"><p className="text-[9px] font-black opacity-20 mb-1 uppercase">Estado PC</p><span className={`text-xl font-black ${latest?.cpu_usage > 90 ? 'text-orange-500' : 'text-blue-400'}`}>{latest?.cpu_usage > 90 ? 'CRÍTICO' : 'ESTABLE'}</span></div>
+                           </div>
                          </div>
-                     </div>
-                      <div className="bg-white/5 border border-white/5 rounded-[40px] p-8">
-                          <div className="flex justify-between items-center mb-6">
-                              <h3 className="text-xs font-black opacity-30 uppercase flex items-center gap-2"><Globe size={14}/> Conexiones Red</h3>
-                              <div className="flex gap-4 text-[10px] font-black">
-                                  <span className="flex items-center gap-1 text-blue-400"><ArrowUp size={12}/> {inventory.upload_speed || '0 KB/s'}</span>
-                                  <span className="flex items-center gap-1 text-purple-400"><ArrowDown size={12}/> {inventory.download_speed || '0 KB/s'}</span>
-                              </div>
-                          </div>
-                         <div className="space-y-2">{(expandedConns ? currentDeviceObj?.active_connections : currentDeviceObj?.active_connections?.slice(0, 5))?.map((conn:string, i:number) => (
-                            <div key={i} className="p-4 bg-white/5 rounded-2xl border border-white/5 text-[10px] font-black text-white/40">{conn}</div>
-                         ))}
-                         {currentDeviceObj?.active_connections && currentDeviceObj.active_connections.length > 5 && (
-                             <button onClick={() => setExpandedConns(!expandedConns)} className="w-full mt-2 p-3 text-[10px] font-black uppercase tracking-widest text-white/30 hover:text-white hover:bg-white/5 rounded-xl transition-colors border border-transparent hover:border-white/10">
-                                 {expandedConns ? 'Ocultar Lista' : `Expandir ${currentDeviceObj.active_connections.length - 5} Más`}
-                             </button>
-                         )}
-                        {(!currentDeviceObj?.active_connections || currentDeviceObj.active_connections.length === 0) && (
-                            <div className="text-center opacity-30 italic text-xs py-4">No hay conexiones registradas</div>
-                        )}
-                        </div>
-                     </div>
+                         {/* ANCHO DE BANDA */}
+                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                             <div className="bg-white/5 border border-white/5 rounded-[32px] p-6 flex items-center justify-between shadow-lg group hover:border-blue-500/30 transition-all">
+                                 <div className="flex items-center gap-4">
+                                     <div className="w-12 h-12 bg-blue-500/10 rounded-2xl flex items-center justify-center text-blue-400 group-hover:scale-110 transition-transform"><ArrowDown size={24} /></div>
+                                     <div><p className="text-[10px] font-black opacity-30 uppercase tracking-widest">Tráfico de Bajada (Download)</p><h4 className="text-3xl font-black mt-1 text-white">{inventory?.download_speed || '0.0 KB/s'}</h4></div>
+                                 </div>
+                                 <div className="text-[10px] font-black px-3 py-1 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">RECIBIENDO</div>
+                             </div>
+                             <div className="bg-white/5 border border-white/5 rounded-[32px] p-6 flex items-center justify-between shadow-lg group hover:border-purple-500/30 transition-all">
+                                 <div className="flex items-center gap-4">
+                                     <div className="w-12 h-12 bg-purple-500/10 rounded-2xl flex items-center justify-center text-purple-400 group-hover:scale-110 transition-transform"><ArrowUp size={24} /></div>
+                                     <div><p className="text-[10px] font-black opacity-30 uppercase tracking-widest">Tráfico de Subida (Upload)</p><h4 className="text-3xl font-black mt-1 text-white">{inventory?.upload_speed || '0.0 KB/s'}</h4></div>
+                                 </div>
+                                 <div className="text-[10px] font-black px-3 py-1 rounded-full bg-purple-500/10 text-purple-400 border border-purple-500/20">ENVIANDO</div>
+                             </div>
+                         </div>
+                         {/* GRÁFICA */}
+                         <div className="bg-white/5 border border-white/5 rounded-[40px] p-10 h-[320px]">
+                            <h3 className="font-black mb-8 flex items-center gap-2"><Activity size={20}/> Historial de Rendimiento</h3>
+                            <ResponsiveContainer width="100%" height="80%">
+                                <AreaChart data={metrics}>
+                                    <Tooltip contentStyle={{ backgroundColor: 'rgba(0,0,0,0.8)', borderColor: 'rgba(255,255,255,0.1)', borderRadius: '16px', color: '#fff' }} itemStyle={{ fontSize: '12px', fontWeight: '900' }} labelStyle={{ display: 'none' }} formatter={(value: number, name: string) => [`${value}%`, name === 'cpu_usage' ? 'CPU' : 'RAM']} />
+                                    <Area type="monotone" dataKey="cpu_usage" stroke="#3b82f6" fill="#3b82f6" fillOpacity={0.1} strokeWidth={4} />
+                                    <Area type="monotone" dataKey="ram_usage" stroke="#a855f7" fill="transparent" strokeWidth={4} />
+                                </AreaChart>
+                            </ResponsiveContainer>
+                         </div>
+                         {/* PROCESOS Y RED */}
+                         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 pb-10">
+                            <div className="bg-white/5 border border-white/5 rounded-[40px] p-8">
+                                <h3 className="text-xs font-black opacity-30 mb-6 uppercase flex items-center gap-2"><List size={14}/> Procesos Top</h3>
+                                <div className="space-y-2">
+                                  {(expandedProcs ? latest?.processes : latest?.processes?.slice(0, 5))?.map((p:any, i:number) => (
+                                     <div key={i} className="flex justify-between p-4 bg-white/5 rounded-2xl border border-white/5 text-xs font-bold"><span>{p.name}</span><span className="text-blue-500">{p.cpu?.toFixed(1) || p.cpu}%</span></div>
+                                  ))}
+                                  {latest?.processes && latest.processes.length > 5 && (
+                                      <button onClick={() => setExpandedProcs(!expandedProcs)} className="w-full mt-2 p-3 text-[10px] font-black uppercase tracking-widest text-white/30 hover:text-white hover:bg-white/5 rounded-xl transition-colors border border-transparent hover:border-white/10">
+                                          {expandedProcs ? 'Ocultar Lista' : `Expandir ${latest.processes.length - 5} Más`}
+                                      </button>
+                                  )}
+                                </div>
+                            </div>
+                            <div className="bg-white/5 border border-white/5 rounded-[40px] p-8">
+                                <div className="flex justify-between items-center mb-6">
+                                    <h3 className="text-xs font-black opacity-30 uppercase flex items-center gap-2"><Globe size={14}/> Conexiones Red</h3>
+                                    <div className="flex gap-4 text-[10px] font-black">
+                                        <span className="flex items-center gap-1 text-blue-400"><ArrowUp size={12}/> {inventory?.upload_speed || '0 KB/s'}</span>
+                                        <span className="flex items-center gap-1 text-purple-400"><ArrowDown size={12}/> {inventory?.download_speed || '0 KB/s'}</span>
+                                    </div>
+                                </div>
+                                <div className="space-y-2">
+                                  {(expandedConns ? currentDeviceObj?.active_connections : currentDeviceObj?.active_connections?.slice(0, 5))?.map((conn:string, i:number) => (
+                                     <div key={i} className="p-4 bg-white/5 rounded-2xl border border-white/5 text-[10px] font-black text-white/40">{conn}</div>
+                                  ))}
+                                  {currentDeviceObj?.active_connections && currentDeviceObj.active_connections.length > 5 && (
+                                      <button onClick={() => setExpandedConns(!expandedConns)} className="w-full mt-2 p-3 text-[10px] font-black uppercase tracking-widest text-white/30 hover:text-white hover:bg-white/5 rounded-xl transition-colors border border-transparent hover:border-white/10">
+                                          {expandedConns ? 'Ocultar Lista' : `Expandir ${currentDeviceObj.active_connections.length - 5} Más`}
+                                      </button>
+                                  )}
+                                  {(!currentDeviceObj?.active_connections || currentDeviceObj.active_connections.length === 0) && (
+                                      <div className="text-center opacity-30 italic text-xs py-4">No hay conexiones registradas</div>
+                                  )}
+                                </div>
+                            </div>
+                         </div>
+                       </div>
+                     )}
+
+                     <AgentlessMonitorView
+                       deviceInfo={discoveredDevicesList.find(d => d.hostname === selectedDevice) || (selectedDevice ? { hostname: selectedDevice, ip: inventory?.local_ip || null, mac: '00:00:00:00:00:00' } : null)}
+                       apiUrl={API_URL}
+                       forceOnline={currentDeviceObj?.status === 'ONLINE'}
+                     />
                    </div>
-                  </>
-                  )}
-               </div>
-             )}
-             </div>
-           </div>
-         )}
+                 )}
+            </div>
+          </div>
+        )}
 
         {/* AUDITORÍA DERECHA */}
         {view !== 'global' && view !== 'network_map' && view !== 'users' && (

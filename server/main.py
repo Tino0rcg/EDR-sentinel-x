@@ -83,15 +83,14 @@ class AlertDB(Base):
 class NetworkProbeDB(Base):
     __tablename__ = "network_probes"
     id = Column(Integer, primary_key=True)
-    ip = Column(String, nullable=False)
-    hostname = Column(String, nullable=True)
-    latency_ms = Column(Float, nullable=True)   # None = offline
-    open_ports = Column(JSON, nullable=True)     # list of {port, service, risk}
-    mac = Column(String, nullable=True)
-    device_type = Column(String, nullable=True)
-    vendor = Column(String, nullable=True)
+    target_ip = Column(String, nullable=False)
+    target_hostname = Column(String, nullable=True)
+    probed_by = Column(String, nullable=False)   # hostname del agente que hizo el sondeo
+    ping_ms = Column(Float, nullable=True)        # latencia en ms, None = host down
+    open_ports = Column(JSON, nullable=True)      # lista de puertos abiertos
+    os_guess = Column(String, nullable=True)
+    company_id = Column(Integer, nullable=True)
     timestamp = Column(Float, nullable=False)
-    reporter_hostname = Column(String, nullable=True)  # which agent reported this
 
 try:
     Base.metadata.create_all(bind=engine)
@@ -210,7 +209,7 @@ async def lifespan(app: FastAPI):
             db.commit()
         except:
             db.rollback()
-
+            
         if db.query(UserDB).count() == 0:
             h = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
             db.add(UserDB(email="admin@sentinel.com", hashed_password=h, role="ADMIN")); db.commit()
@@ -445,68 +444,111 @@ def delete_user(user_id: int):
 def get_metrics(hostname: str):
     db = SessionLocal(); data = db.query(MetricDB).filter(MetricDB.hostname == hostname).order_by(MetricDB.timestamp.desc()).limit(50).all(); db.close(); return data
 
-class NetworkProbe(BaseModel):
-    ip: str
-    hostname: Optional[str] = None
-    latency_ms: Optional[float] = None
-    open_ports: Optional[List[Any]] = []
-    mac: Optional[str] = None
-    device_type: Optional[str] = None
-    vendor: Optional[str] = None
-    timestamp: float
-    reporter_hostname: Optional[str] = None
-
 @app.post("/network-probe")
-def post_network_probe(probes: List[NetworkProbe]):
+def post_network_probe(data: Dict[str, Any]):
     db = SessionLocal()
     try:
-        for probe in probes:
-            db.add(NetworkProbeDB(
-                ip=probe.ip,
-                hostname=probe.hostname,
-                latency_ms=probe.latency_ms,
-                open_ports=probe.open_ports,
-                mac=probe.mac,
-                device_type=probe.device_type,
-                vendor=probe.vendor,
-                timestamp=probe.timestamp,
-                reporter_hostname=probe.reporter_hostname
-            ))
+        company_id = None
+        cname = data.get("company_name", "Default Company")
+        comp = db.query(CompanyDB).filter(CompanyDB.name == cname).first()
+        if comp:
+            company_id = comp.id
+
+        probe = NetworkProbeDB(
+            target_ip=data.get("target_ip", ""),
+            target_hostname=data.get("target_hostname"),
+            probed_by=data.get("probed_by", ""),
+            ping_ms=data.get("ping_ms"),
+            open_ports=data.get("open_ports", []),
+            os_guess=data.get("os_guess"),
+            company_id=company_id,
+            timestamp=data.get("timestamp", time.time())
+        )
+        db.add(probe)
+
+        # Generar alerta automática si se detecta puerto peligroso nuevo
+        DANGER_PORTS = {
+            22: "SSH", 23: "Telnet (PELIGROSO)", 3389: "RDP Expuesto",
+            445: "SMB (EternalBlue Risk)", 135: "MS-RPC", 5900: "VNC Expuesto",
+            4444: "Metasploit Shell", 1337: "Backdoor", 6666: "Backdoor"
+        }
+        open_ports = data.get("open_ports", [])
+        target_ip = data.get("target_ip", "")
+        target_hn = data.get("target_hostname") or target_ip
+        probed_by = data.get("probed_by", "")
+        for port_info in open_ports:
+            port = port_info.get("port") if isinstance(port_info, dict) else port_info
+            if port in DANGER_PORTS:
+                mem_key = f"PROBE_{target_ip}_PORT_{port}"
+                last_alert = ALERT_MEMORY.get(mem_key, 0)
+                if time.time() - last_alert > 3600:
+                    db.add(AlertDB(
+                        hostname=probed_by,
+                        message=f"PUERTO CRÍTICO DETECTADO en {target_hn} ({target_ip}): Puerto {port} ({DANGER_PORTS[port]}) abierto en la red local",
+                        level="CRITICAL",
+                        timestamp=time.time(),
+                        company_id=company_id
+                    ))
+                    ALERT_MEMORY[mem_key] = time.time()
+
+        # Limpiar probes viejos (mantener solo últimas 24h por IP)
+        cutoff = time.time() - 86400
+        db.query(NetworkProbeDB).filter(
+            NetworkProbeDB.target_ip == target_ip,
+            NetworkProbeDB.timestamp < cutoff
+        ).delete()
+
         db.commit()
     finally:
         db.close()
     return {"status": "ok"}
 
-@app.get("/network-probe/{ip}")
-def get_network_probe(ip: str):
-    """Get the last 60 probe records for a given IP (for latency history chart)"""
-    encoded_ip = ip.replace("_", ".")
+@app.get("/network-probe/{target_ip}")
+def get_network_probe(target_ip: str):
     db = SessionLocal()
-    data = db.query(NetworkProbeDB).filter(NetworkProbeDB.ip == encoded_ip).order_by(NetworkProbeDB.timestamp.desc()).limit(60).all()
+    # Obtener los últimos 60 sondeos para dar historial de latencia
+    data = db.query(NetworkProbeDB).filter(
+        NetworkProbeDB.target_ip == target_ip
+    ).order_by(NetworkProbeDB.timestamp.desc()).limit(60).all()
     db.close()
     return list(reversed(data))
 
-@app.get("/network-probes/latest")
-def get_latest_probes():
-    """Get the most recent probe for every known IP"""
+@app.get("/network-probe-latest")
+def get_all_latest_probes(company_id: Optional[int] = None):
+    """Retorna el último sondeo de cada IP única para el resumen de red."""
     db = SessionLocal()
     from sqlalchemy import text
-    rows = db.execute(text("""
-        SELECT np.* FROM network_probes np
-        INNER JOIN (
-            SELECT ip, MAX(timestamp) as max_ts FROM network_probes GROUP BY ip
-        ) latest ON np.ip = latest.ip AND np.timestamp = latest.max_ts
-    """)).fetchall()
+    if company_id:
+        rows = db.execute(text(
+            "SELECT * FROM network_probes WHERE company_id=:cid GROUP BY target_ip HAVING MAX(timestamp)"
+        ), {"cid": company_id}).fetchall()
+    else:
+        rows = db.execute(text(
+            "SELECT * FROM network_probes GROUP BY target_ip HAVING MAX(timestamp)"
+        )).fetchall()
     db.close()
     result = []
     for r in rows:
-        result.append({
-            "id": r.id, "ip": r.ip, "hostname": r.hostname,
-            "latency_ms": r.latency_ms, "open_ports": r.open_ports,
-            "mac": r.mac, "device_type": r.device_type, "vendor": r.vendor,
-            "timestamp": r.timestamp, "reporter_hostname": r.reporter_hostname
-        })
+        d = dict(r._mapping)
+        result.append(d)
     return result
+
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+dashboard_path = os.path.join(os.path.dirname(__file__), "..", "dashboard", "dist")
+if os.path.exists(dashboard_path):
+    app.mount("/assets", StaticFiles(directory=os.path.join(dashboard_path, "assets")), name="assets")
+    
+    @app.get("/{full_path:path}")
+    def serve_react_app(full_path: str):
+        # Prevent API calls from returning index.html
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="API route not found")
+        path = os.path.join(dashboard_path, full_path)
+        if os.path.exists(path) and os.path.isfile(path):
+            return FileResponse(path)
+        return FileResponse(os.path.join(dashboard_path, "index.html"))
 
 if __name__ == "__main__":
     import uvicorn

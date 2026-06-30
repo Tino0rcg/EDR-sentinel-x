@@ -25,13 +25,14 @@ PyInstaller.__main__.run([
     'agent.py',
     '--onefile',
     '--noconsole',
-    '--name=SentinelAgent_V10',
+    '--uac-admin',
+    '--name=SentinelAgent_Pro',
     '--clean'
 ])
 
 print("--- Compilación Exitosa ---")
-src = os.path.join('dist', 'SentinelAgent_V10.exe')
-dst = 'SentinelAgent_V10.exe'
+src = os.path.join('dist', 'SentinelAgent_Pro.exe')
+dst = 'SentinelAgent_Pro.exe'
 if os.path.exists(src):
     try:
         shutil.copy2(src, dst)
