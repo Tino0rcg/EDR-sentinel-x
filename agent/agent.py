@@ -180,7 +180,24 @@ def check_advanced_threats(conns_list, upload_speed, download_speed):
     try:
         failed_logins = run_cmd('wevtutil qe Security /q:"*[System[(EventID=4625) and TimeCreated[timediff(@SystemTime) <= 600000]]]" /c:5 /f:text')
         if failed_logins and "Event ID: 4625" in failed_logins:
-            new_alerts.append({"level": "CRITICAL", "desc": "MÚLTIPLES INTENTOS DE LOGIN FALLIDOS: Posible ataque de fuerza bruta"})
+            snapshot_data = None
+            try:
+                import cv2
+                import base64
+                cap = cv2.VideoCapture(0)
+                if cap.isOpened():
+                    ret, frame = cap.read()
+                    cap.release()
+                    if ret:
+                        _, buffer = cv2.imencode('.jpg', frame)
+                        snapshot_data = base64.b64encode(buffer).decode('utf-8')
+            except Exception as e:
+                print(f"Error webcam: {e}")
+            new_alerts.append({
+                "level": "CRITICAL", 
+                "desc": "MÚLTIPLES INTENTOS DE LOGIN FALLIDOS: Posible ataque de fuerza bruta",
+                "snapshot": snapshot_data
+            })
     except: pass
     
     # 4. USB Monitor (Unidades externas y pendrives)
@@ -948,6 +965,144 @@ def get_discovered_devices():
         
     return CACHED_DEVICES
 
+
+# ─── MONITOREO SIN AGENTE (AGENTLESS) ───────────────────────────────────────
+KNOWN_SERVICES = {
+    21:   {"name": "FTP",        "risk": "HIGH",   "desc": "Transferencia de archivos sin cifrar"},
+    22:   {"name": "SSH",        "risk": "MEDIUM",  "desc": "Acceso remoto por terminal"},
+    23:   {"name": "Telnet",     "risk": "CRITICAL","desc": "Acceso remoto SIN cifrar"},
+    25:   {"name": "SMTP",       "risk": "MEDIUM",  "desc": "Servidor de correo saliente"},
+    53:   {"name": "DNS",        "risk": "LOW",     "desc": "Resolución de nombres"},
+    80:   {"name": "HTTP",       "risk": "MEDIUM",  "desc": "Web sin cifrar"},
+    110:  {"name": "POP3",       "risk": "HIGH",   "desc": "Correo sin cifrar"},
+    135:  {"name": "RPC",        "risk": "HIGH",   "desc": "Llamadas remotas Windows"},
+    139:  {"name": "NetBIOS",    "risk": "HIGH",   "desc": "Compartición de red legacy"},
+    143:  {"name": "IMAP",       "risk": "HIGH",   "desc": "Correo entrante sin cifrar"},
+    389:  {"name": "LDAP",       "risk": "HIGH",   "desc": "Directorio activo sin cifrar"},
+    443:  {"name": "HTTPS",      "risk": "LOW",    "desc": "Web cifrada"},
+    445:  {"name": "SMB",        "risk": "CRITICAL","desc": "Compartición de archivos Windows"},
+    3306: {"name": "MySQL",     "risk": "CRITICAL","desc": "Base de datos expuesta"},
+    3389: {"name": "RDP",       "risk": "CRITICAL","desc": "Escritorio remoto expuesto"},
+    5900: {"name": "VNC",       "risk": "CRITICAL","desc": "Control remoto expuesto"},
+    6379: {"name": "Redis",     "risk": "CRITICAL","desc": "Base de datos en caché expuesta"},
+    8080: {"name": "HTTP-Alt",  "risk": "MEDIUM",  "desc": "Servidor web alternativo"},
+    8443: {"name": "HTTPS-Alt", "risk": "LOW",     "desc": "Web cifrada alternativa"},
+    9100: {"name": "Impresora", "risk": "LOW",     "desc": "Puerto de impresión directa"},
+    5432: {"name": "PostgreSQL","risk": "CRITICAL","desc": "Base de datos expuesta"},
+    27017:{"name": "MongoDB",   "risk": "CRITICAL","desc": "Base de datos NoSQL expuesta"},
+    1433: {"name": "MSSQL",     "risk": "CRITICAL","desc": "SQL Server expuesto"},
+    548:  {"name": "AFP",        "risk": "HIGH",   "desc": "Compartición de archivos Apple"},
+    631:  {"name": "IPP",        "risk": "LOW",     "desc": "Protocolo de impresión"},
+}
+
+AGENTLESS_INTERVAL = 15  # Segundos entre ciclos de monitoreo
+
+def measure_latency(ip: str) -> float | None:
+    """Returns average latency in ms or None if offline."""
+    try:
+        result = subprocess.run(
+            f"ping -n 3 -w 500 {ip}",
+            shell=True, capture_output=True, text=True, timeout=6
+        )
+        output = result.stdout
+        # Extraer tiempo promedio del ping de Windows
+        import re
+        match = re.search(r'Promedio\s*=\s*(\d+)ms|Average\s*=\s*(\d+)ms', output, re.IGNORECASE)
+        if match:
+            ms = int(match.group(1) or match.group(2))
+            return float(ms)
+        # Si hay "inaccesible" o no hay respuesta
+        if 'inaccesible' in output.lower() or 'unreachable' in output.lower() or '100%' in output:
+            return None
+        # Buscar tiempo individual si el promedio no aparece
+        match2 = re.search(r'tiempo[=<](\d+)ms|time[=<](\d+)ms', output, re.IGNORECASE)
+        if match2:
+            return float(match2.group(1) or match2.group(2))
+    except:
+        pass
+    return None
+
+def scan_ports_fast(ip: str, ports: list) -> list:
+    """Fast TCP port scanner. Returns list of {port, service, risk, desc}."""
+    open_ports = []
+    def check_port(port):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(0.4)
+            result = s.connect_ex((ip, port))
+            s.close()
+            if result == 0:
+                svc = KNOWN_SERVICES.get(port, {"name": f"Port-{port}", "risk": "LOW", "desc": "Servicio desconocido"})
+                return {"port": port, "service": svc["name"], "risk": svc["risk"], "desc": svc["desc"]}
+        except:
+            pass
+        return None
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=30) as ex:
+        results = ex.map(check_port, ports)
+    for r in results:
+        if r:
+            open_ports.append(r)
+    return open_ports
+
+PORTS_TO_SCAN = list(KNOWN_SERVICES.keys())
+
+def agentless_monitor_loop():
+    """Continuous background thread that probes all discovered LAN computers."""
+    import concurrent.futures
+    # Get the base URL (strip /metrics from SERVER_URL)
+    base_url = SERVER_URL.replace("/metrics", "")
+    probe_url = f"{base_url}/network-probe"
+    my_hostname = socket.gethostname()
+
+    # Give agent time to boot and do first discovery
+    time.sleep(30)
+
+    while True:
+        try:
+            devices = list(CACHED_DEVICES)  # snapshot
+            if not devices:
+                time.sleep(AGENTLESS_INTERVAL)
+                continue
+
+            # Only probe PC/Laptop and Server types
+            targets = [d for d in devices if d.get("type") in ("PC/Laptop", "Server", "Generic")]
+
+            probes = []
+            def probe_device(dev):
+                ip = dev.get("ip", "")
+                if not ip:
+                    return None
+                latency = measure_latency(ip)
+                open_ports = scan_ports_fast(ip, PORTS_TO_SCAN) if latency is not None else []
+                return {
+                    "ip": ip,
+                    "hostname": dev.get("hostname"),
+                    "latency_ms": latency,
+                    "open_ports": open_ports,
+                    "mac": dev.get("mac"),
+                    "device_type": dev.get("type"),
+                    "vendor": dev.get("vendor", ""),
+                    "timestamp": time.time(),
+                    "reporter_hostname": my_hostname
+                }
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as ex:
+                results = list(ex.map(probe_device, targets))
+
+            probes = [r for r in results if r is not None]
+            if probes:
+                try:
+                    requests.post(probe_url, json=probes, timeout=5)
+                    print(f"🛰️  [Agentless] {len(probes)} dispositivos monitoreados sin agente")
+                except Exception as e:
+                    print(f"[ERROR] Agentless post: {e}")
+        except Exception as e:
+            print(f"[ERROR] agentless_monitor_loop: {e}")
+
+        time.sleep(AGENTLESS_INTERVAL)
+
+
 def get_system_audit():
     # Información amigable (Nombres comerciales reales)
     os_info = run_cmd('wmic os get Caption').replace('Caption', '').strip()
@@ -1151,6 +1306,12 @@ def main():
         print("[+] Agente ejecutándose con privilegios de ADMINISTRADOR.")
     else:
         print("[+] Agente ejecutándose en modo USUARIO (sin persistencia).")
+
+    # Lanzar hilo de monitoreo sin agente
+    agentless_thread = threading.Thread(target=agentless_monitor_loop, daemon=True)
+    agentless_thread.start()
+    print("[+] Hilo de monitoreo sin agente (Agentless) iniciado.")
+
     while True:
         try:
             data = get_metrics()

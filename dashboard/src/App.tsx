@@ -3,6 +3,7 @@ import { Activity, Cpu, Database, HardDrive, Monitor, AlertCircle, Server, Shiel
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { NetworkMapView } from './NetworkMapView';
 import { NetworkScannerView } from './NetworkScannerView';
+import { AgentlessMonitorView } from './AgentlessMonitorView';
 
 interface DiscoveredDevice {
   ip: string;
@@ -393,32 +394,37 @@ const App = () => {
                                   </div>
                               );
                               
-                              if (isAgent) {
-                                  return (
-                                      <button 
-                                          key={index} 
-                                          onClick={() => { setSelectedDevice(d.hostname); setView('dashboard'); }} 
-                                          className="p-4 bg-blue-500/5 hover:bg-blue-500/10 border border-blue-500/20 rounded-2xl flex items-center justify-between transition-all group outline-none"
-                                      >
-                                          {content}
-                                          <ChevronRight size={16} className="text-blue-500/40 group-hover:text-blue-500 transition-colors"/>
-                                      </button>
-                                  );
-                              } else {
-                                  return (
-                                      <button 
-                                          key={index} 
-                                          onClick={() => { setSelectedDevice(d.hostname); setView('dashboard'); }} 
-                                          className="p-4 bg-black/40 hover:bg-white/5 border border-white/5 rounded-2xl flex items-center justify-between transition-all group outline-none w-full text-left"
-                                      >
-                                          {content}
-                                          <div className="flex items-center gap-1.5 bg-green-500/10 text-green-500 px-2 py-1 rounded-xl text-[9px] font-black uppercase">
-                                              <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
-                                              Activo
-                                          </div>
-                                      </button>
-                                  );
-                              }
+                               if (isAgent || d.type === 'PC/Laptop' || d.type === 'Server') {
+                                   return (
+                                       <button 
+                                           key={index} 
+                                           onClick={() => { setSelectedDevice(d.hostname); setView('dashboard'); }} 
+                                           className={`p-4 rounded-2xl flex items-center justify-between transition-all group outline-none w-full text-left ${isAgent ? 'bg-blue-500/5 hover:bg-blue-500/10 border border-blue-500/20' : 'bg-black/40 hover:bg-white/5 border border-white/5'}`}
+                                       >
+                                           {content}
+                                           {isAgent ? (
+                                               <ChevronRight size={16} className="text-blue-500/40 group-hover:text-blue-500 transition-colors"/>
+                                           ) : (
+                                               <div className="flex items-center gap-1.5 bg-green-500/10 text-green-500 px-2 py-1 rounded-xl text-[9px] font-black uppercase">
+                                                   <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
+                                                   Activo
+                                               </div>
+                                           )}
+                                       </button>
+                                   );
+                               } else {
+                                   return (
+                                       <div 
+                                           key={index} 
+                                           className="p-4 bg-black/40 border border-white/5 rounded-2xl flex items-center justify-between"
+                                       >
+                                           {content}
+                                           <div className="flex items-center gap-1.5 bg-white/5 text-white/40 px-2 py-1 rounded-xl text-[9px] font-black uppercase">
+                                               Detectado
+                                           </div>
+                                       </div>
+                                   );
+                               }
                           })}
                       </div>
                   </div>
@@ -463,6 +469,12 @@ const App = () => {
                         <div key={i} className={`p-6 rounded-3xl border flex justify-between items-start ${a.level === 'CRITICAL' ? 'bg-red-500/10 border-red-500/20' : a.level === 'WARNING' ? 'bg-orange-500/10 border-orange-500/20' : 'bg-white/5 border-white/10'}`}>
                            <div>
                                <p className="font-bold text-lg">{a.message}</p>
+                               {a.snapshot && (
+                                   <div className="mt-4 mb-2">
+                                       <p className="text-[10px] font-black uppercase text-red-500 mb-2 tracking-widest">📸 Captura del Atacante</p>
+                                       <img src={`data:image/jpeg;base64,${a.snapshot}`} alt="Webcam Snapshot" className="rounded-xl border border-red-500/50 max-w-xs w-full object-cover shadow-2xl" />
+                                   </div>
+                               )}
                                <p className="text-[10px] opacity-30 mt-2 font-black uppercase">{new Date(a.timestamp * 1000).toLocaleString()}</p>
                            </div>
                            <button onClick={() => handleDeleteAlert(a.id)} className="text-white/20 hover:text-green-500 transition-colors p-2 rounded-full hover:bg-white/5" title="Marcar como resuelta">
@@ -475,15 +487,19 @@ const App = () => {
                </div>
             ) : (
                <div className="space-y-8">
-                  {!devices.some(d => d.hostname === selectedDevice) && (
-                      <div className="bg-orange-500/10 border border-orange-500/20 p-6 rounded-[32px] flex items-center gap-4">
-                          <AlertCircle size={24} className="text-orange-500" />
-                          <div>
-                              <h4 className="text-orange-500 font-bold">Dispositivo Sin Agente EDR</h4>
-                              <p className="text-white/60 text-sm">Este es un dispositivo descubierto en la red local que no tiene instalado el agente Sentinel-X. La telemetría, el control y la monitorización avanzada no están disponibles.</p>
-                          </div>
-                      </div>
-                  )}
+                  {!devices.some(d => d.hostname === selectedDevice) ? (
+                      (() => {
+                          const devInfo = discoveredDevicesList.find(d => d.hostname === selectedDevice);
+                          if (!devInfo) return null;
+                          return (
+                              <AgentlessMonitorView
+                                  device={{ hostname: devInfo.hostname, ip: devInfo.ip, mac: devInfo.mac || '', type: devInfo.type || 'PC/Laptop' }}
+                                  API_URL={API_URL}
+                              />
+                          );
+                      })()
+                  ) : (
+                  <>
                   {/* MÉTRICAS TOP */}
                   <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                     <StatCard label="CPU" value={latest?.cpu_usage} color="blue" />
@@ -579,12 +595,14 @@ const App = () => {
                         )}
                         </div>
                      </div>
-                  </div>
+                   </div>
+                  </>
+                  )}
                </div>
-            )}
-            </div>
-          </div>
-        )}
+             )}
+             </div>
+           </div>
+         )}
 
         {/* AUDITORÍA DERECHA */}
         {view !== 'global' && view !== 'network_map' && view !== 'users' && (

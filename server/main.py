@@ -78,6 +78,20 @@ class AlertDB(Base):
     __tablename__ = "alerts"
     id = Column(Integer, primary_key=True); hostname = Column(String); message = Column(String); level = Column(String); timestamp = Column(Float)
     company_id = Column(Integer, nullable=True)
+    snapshot = Column(String, nullable=True)
+
+class NetworkProbeDB(Base):
+    __tablename__ = "network_probes"
+    id = Column(Integer, primary_key=True)
+    ip = Column(String, nullable=False)
+    hostname = Column(String, nullable=True)
+    latency_ms = Column(Float, nullable=True)   # None = offline
+    open_ports = Column(JSON, nullable=True)     # list of {port, service, risk}
+    mac = Column(String, nullable=True)
+    device_type = Column(String, nullable=True)
+    vendor = Column(String, nullable=True)
+    timestamp = Column(Float, nullable=False)
+    reporter_hostname = Column(String, nullable=True)  # which agent reported this
 
 try:
     Base.metadata.create_all(bind=engine)
@@ -190,7 +204,13 @@ async def lifespan(app: FastAPI):
             db.commit()
         except:
             db.rollback()
-            
+        try:
+            from sqlalchemy import text
+            db.execute(text("ALTER TABLE alerts ADD COLUMN snapshot TEXT"))
+            db.commit()
+        except:
+            db.rollback()
+
         if db.query(UserDB).count() == 0:
             h = bcrypt.hashpw("admin123".encode(), bcrypt.gensalt()).decode()
             db.add(UserDB(email="admin@sentinel.com", hashed_password=h, role="ADMIN")); db.commit()
@@ -252,7 +272,8 @@ async def post_metrics(data: Metrics, background_tasks: BackgroundTasks):
             is_status_alert = any(k in threat['desc'].upper() for k in ["FIREWALL", "ANTIVIRUS", "LICENCIA", "DISCO"])
             
             if is_status_alert or (time.time() - last_alert_time > 3600): 
-                db.add(AlertDB(hostname=data.hostname, message=threat['desc'], level=level, timestamp=data.timestamp, company_id=company_id))
+                snapshot_data = threat.get('snapshot')
+                db.add(AlertDB(hostname=data.hostname, message=threat['desc'], level=level, timestamp=data.timestamp, company_id=company_id, snapshot=snapshot_data))
                 ALERT_MEMORY[mem_key] = time.time()
                 background_tasks.add_task(send_email_task, f"Amenaza en {data.hostname} ({cname})", threat['desc'], True)
                 print(f"🛑 [SERVER] Alerta CRÍTICA registrada (Silencio activado por 1h)")
@@ -423,6 +444,69 @@ def delete_user(user_id: int):
 @app.get("/metrics/{hostname}")
 def get_metrics(hostname: str):
     db = SessionLocal(); data = db.query(MetricDB).filter(MetricDB.hostname == hostname).order_by(MetricDB.timestamp.desc()).limit(50).all(); db.close(); return data
+
+class NetworkProbe(BaseModel):
+    ip: str
+    hostname: Optional[str] = None
+    latency_ms: Optional[float] = None
+    open_ports: Optional[List[Any]] = []
+    mac: Optional[str] = None
+    device_type: Optional[str] = None
+    vendor: Optional[str] = None
+    timestamp: float
+    reporter_hostname: Optional[str] = None
+
+@app.post("/network-probe")
+def post_network_probe(probes: List[NetworkProbe]):
+    db = SessionLocal()
+    try:
+        for probe in probes:
+            db.add(NetworkProbeDB(
+                ip=probe.ip,
+                hostname=probe.hostname,
+                latency_ms=probe.latency_ms,
+                open_ports=probe.open_ports,
+                mac=probe.mac,
+                device_type=probe.device_type,
+                vendor=probe.vendor,
+                timestamp=probe.timestamp,
+                reporter_hostname=probe.reporter_hostname
+            ))
+        db.commit()
+    finally:
+        db.close()
+    return {"status": "ok"}
+
+@app.get("/network-probe/{ip}")
+def get_network_probe(ip: str):
+    """Get the last 60 probe records for a given IP (for latency history chart)"""
+    encoded_ip = ip.replace("_", ".")
+    db = SessionLocal()
+    data = db.query(NetworkProbeDB).filter(NetworkProbeDB.ip == encoded_ip).order_by(NetworkProbeDB.timestamp.desc()).limit(60).all()
+    db.close()
+    return list(reversed(data))
+
+@app.get("/network-probes/latest")
+def get_latest_probes():
+    """Get the most recent probe for every known IP"""
+    db = SessionLocal()
+    from sqlalchemy import text
+    rows = db.execute(text("""
+        SELECT np.* FROM network_probes np
+        INNER JOIN (
+            SELECT ip, MAX(timestamp) as max_ts FROM network_probes GROUP BY ip
+        ) latest ON np.ip = latest.ip AND np.timestamp = latest.max_ts
+    """)).fetchall()
+    db.close()
+    result = []
+    for r in rows:
+        result.append({
+            "id": r.id, "ip": r.ip, "hostname": r.hostname,
+            "latency_ms": r.latency_ms, "open_ports": r.open_ports,
+            "mac": r.mac, "device_type": r.device_type, "vendor": r.vendor,
+            "timestamp": r.timestamp, "reporter_hostname": r.reporter_hostname
+        })
+    return result
 
 if __name__ == "__main__":
     import uvicorn
