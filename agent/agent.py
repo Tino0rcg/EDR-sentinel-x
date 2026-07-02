@@ -19,6 +19,7 @@ except:
 # --- CONFIGURACIÓN ---
 INTERVAL = 5 
 DEFAULT_IP = "localhost"
+LAST_DISCOVERY_TIME = 0
 
 if getattr(sys, 'frozen', False):
     exe_dir = os.path.dirname(sys.executable)
@@ -87,7 +88,7 @@ def is_admin():
         return False
 
 def check_single_instance():
-    mutex_name = "Local\\SentinelAgentMutex_Unique_12345"
+    mutex_name = "Local\\SentinelAgentMutex_Unique_99999"
     kernel32 = ctypes.windll.kernel32
     mutex = kernel32.CreateMutexW(None, True, mutex_name)
     last_error = kernel32.GetLastError()
@@ -172,10 +173,23 @@ def check_advanced_threats(raw_conns, upload_speed, download_speed):
             elif rport in suspicious_ports: sus_port = rport
             
             if sus_port and sus_port not in alerted_ports:
-                alerted_ports.add(sus_port)
                 pid = c.pid
                 
+                # Ignorar el propio agente (Falso positivo del escaneo de red)
+                import os
+                if pid == os.getpid():
+                    continue
+                    
                 pname = "Desconocido"
+                try:
+                    pname = psutil.Process(pid).name() if pid else "Desconocido"
+                except: pass
+                
+                # Ignorar si es otra instancia del agente
+                if pname.lower() in ["python.exe", "sentinelagent.exe"]:
+                    continue
+                
+                alerted_ports.add(sus_port)
                 ppath = "N/A"
                 puser = "N/A"
                 sig_status = "No Firmado / Desconocida"
@@ -360,13 +374,18 @@ def get_vendor_by_mac(mac):
         return OUI_DATABASE[prefix]
         
     try:
-        res = requests.get(f"https://api.maclookup.app/v2/macs/{clean_mac}", timeout=2)
-        if res.status_code == 200:
-            data = res.json()
-            vendor = data.get("company", "")
-            if vendor:
-                MAC_VENDOR_CACHE[prefix] = vendor
-                return vendor
+        from mac_vendor_lookup import MacLookup
+        mac = MacLookup()
+        if not hasattr(MacLookup, "_updated"):
+            try:
+                mac.update_vendors()
+            except:
+                pass
+            MacLookup._updated = True
+        vendor = mac.lookup(clean_mac)
+        if vendor:
+            MAC_VENDOR_CACHE[prefix] = vendor
+            return vendor
     except:
         pass
         
@@ -791,7 +810,7 @@ def detect_device_details(ip, mac):
             name = f"Dispositivo Genérico"
     
     # 3. Escaneo rápido de firmas
-    ports = [22, 80, 135, 445, 631, 9100, 8008]
+    ports = [22, 80, 135, 445, 631, 9100, 8008, 8009, 62078]
     open_ports = []
     for p in ports:
         try:
@@ -865,7 +884,7 @@ def detect_device_details(ip, mac):
     # Clasificación por servicios/puertos
     if 9100 in open_ports or 631 in open_ports:
         device_type = "Printer"
-    elif 8008 in open_ports or "tv" in (exact_model or name or "").lower():
+    elif 8008 in open_ports or 8009 in open_ports or "tv" in (exact_model or name or "").lower():
         device_type = "TV"
     elif 445 in open_ports or 135 in open_ports:
         device_type = "PC/Laptop"
@@ -889,7 +908,7 @@ def detect_device_details(ip, mac):
             device_type = "Mobile"
         elif vendor == "Apple":
             # Si es Apple y no tiene puertos típicos de PC (135/445) ni SSH (22), asumimos móvil (iPhone/iPad)
-            if not any(p in open_ports for p in [22, 135, 445]):
+            if 62078 in open_ports or not any(p in open_ports for p in [22, 135, 445]):
                 device_type = "Mobile"
             else:
                 device_type = "PC/Laptop"
@@ -950,23 +969,19 @@ def detect_device_details(ip, mac):
 
 def ping_device(ip):
     try:
-        # En Windows, -n 1 envía un ping, -w 80 define 80ms de timeout
-        subprocess.run(f"ping -n 1 -w 80 {ip}", shell=True, capture_output=True)
+        # En Windows, -n 1 envía un ping, -w 500 define 500ms de timeout para mayor efectividad
+        subprocess.run(f"ping -n 1 -w 500 {ip}", shell=True, capture_output=True)
     except:
         pass
 
-def get_discovered_devices():
-    global LAST_DISCOVERY_TIME, CACHED_DEVICES
+DISCOVERY_IN_PROGRESS = False
+
+def run_network_discovery_background():
+    global LAST_DISCOVERY_TIME, CACHED_DEVICES, DISCOVERY_IN_PROGRESS
+    
     current_time = time.time()
+    devices = []
     
-    # Cachear descubrimientos durante 60 segundos
-    if current_time - LAST_DISCOVERY_TIME < 60 and CACHED_DEVICES:
-        return CACHED_DEVICES
-        
-    import re
-    import concurrent.futures
-    
-    # 0. Lanzar descubrimiento SSDP y mDNS multicast en paralelo para marcas/modelos
     try:
         ssdp_thread = threading.Thread(target=background_ssdp_discover)
         ssdp_thread.daemon = True
@@ -978,7 +993,6 @@ def get_discovered_devices():
     except Exception as ssdp_err:
         print(f"[ERROR] Hilo SSDP/mDNS fallido: {ssdp_err}")
         
-    # 1. Barrido de subred por pings concurrentes rápidos (llena la tabla ARP de Windows)
     try:
         ips_to_scan = []
         for interface, addrs in psutil.net_if_addrs().items():
@@ -997,11 +1011,78 @@ def get_discovered_devices():
         
         ips_to_scan = list(set(ips_to_scan))
         if ips_to_scan:
-            # Enviar pings en paralelo para llenar la tabla ARP rápidamente
             with concurrent.futures.ThreadPoolExecutor(max_workers=100) as ping_executor:
                 ping_executor.map(ping_device, ips_to_scan)
     except Exception as sweep_err:
-        print(f"[ERROR] Sweep de pings fallido: {sweep_err}")
+        pass
+
+    try:
+        import re
+        output = subprocess.run("arp -a", shell=True, capture_output=True, text=True, timeout=5).stdout
+        pattern = re.compile(r"^\s*([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\s+([0-9a-fA-F:-]{17})\s+(\w+)", re.MULTILINE)
+        found = pattern.findall(output)
+        
+        candidates = []
+        for ip, mac, _type in found:
+            mac_std = mac.replace("-", ":").upper()
+            octets = ip.split(".")
+            if len(octets) != 4:
+                continue
+            first_octet = int(octets[0])
+            last_octet = int(octets[3])
+            
+            if first_octet >= 224 and first_octet <= 239:
+                continue
+            if last_octet == 255:
+                continue
+            if ip in ["255.255.255.255", "127.0.0.1", "0.0.0.0"]:
+                continue
+            
+            candidates.append((ip, mac_std))
+        
+        seen_ips = set()
+        unique_candidates = []
+        for ip, mac in candidates:
+            if ip not in seen_ips:
+                seen_ips.add(ip)
+                unique_candidates.append((ip, mac))
+        
+        unique_candidates = unique_candidates[:100]
+        
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=40) as executor:
+                futures = {executor.submit(detect_device_details, ip, mac): (ip, mac) for ip, mac in unique_candidates}
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        dev = future.result()
+                        if dev:
+                            devices.append(dev)
+                    except:
+                        pass
+        except Exception as t_err:
+            pass
+            
+    except Exception as e:
+        pass
+        
+    if devices:
+        CACHED_DEVICES = devices
+        
+    LAST_DISCOVERY_TIME = time.time()
+    DISCOVERY_IN_PROGRESS = False
+
+def get_discovered_devices():
+    global LAST_DISCOVERY_TIME, CACHED_DEVICES, DISCOVERY_IN_PROGRESS
+    current_time = time.time()
+    
+    # Si pasaron más de 60 segundos y NO hay un descubrimiento en progreso, lanzar uno
+    if current_time - LAST_DISCOVERY_TIME > 60 and not DISCOVERY_IN_PROGRESS:
+        DISCOVERY_IN_PROGRESS = True
+        t = threading.Thread(target=run_network_discovery_background, daemon=True)
+        t.start()
+        
+    # Siempre retornar inmediatamente la caché (aunque sea vacía o vieja) para no bloquear
+    return CACHED_DEVICES
 
     devices = []
     try:
@@ -1061,13 +1142,33 @@ def get_discovered_devices():
         
     return CACHED_DEVICES
 
+SYSTEM_CACHE = None
+
 def get_system_audit():
-    # Información amigable (Nombres comerciales reales)
-    os_info = run_cmd('wmic os get Caption').replace('Caption', '').strip()
-    if not os_info: os_info = f"{platform.system()} {platform.release()}"
-    
-    cpu_info = run_cmd('wmic cpu get Name').replace('Name', '').strip()
-    if not cpu_info: cpu_info = platform.processor()
+    global SYSTEM_CACHE
+    if not SYSTEM_CACHE:
+        # Información amigable (Nombres comerciales reales)
+        os_info = run_cmd('wmic os get Caption').replace('Caption', '').strip()
+        if not os_info: os_info = f"{platform.system()} {platform.release()}"
+        
+        cpu_info = run_cmd('wmic cpu get Name').replace('Name', '').strip()
+        if not cpu_info: cpu_info = platform.processor()
+        
+        # Estados de Seguridad (PowerShell)
+        fw_active = "False" not in run_cmd('powershell -Command "Get-NetFirewallProfile | Select-Object -ExpandProperty Enabled"')
+        av_active = "True" in run_cmd('powershell -Command "Get-MpComputerStatus | Select-Object -ExpandProperty RealTimeProtectionEnabled"')
+        
+        # Licencia (WMIC es lo único lento, lo dejamos al final)
+        license_raw = run_cmd('wmic path SoftwareLicensingProduct where "Name like \'%Windows%\' and PartialProductKey is not null" get LicenseStatus')
+        license_active = "1" in license_raw
+        
+        SYSTEM_CACHE = {
+            "os_info": os_info,
+            "cpu_info": cpu_info,
+            "fw_active": fw_active,
+            "av_active": av_active,
+            "license_active": license_active
+        }
     
     ram_raw = round(psutil.virtual_memory().total / (1024**3), 0)
     disk_total_raw = round(psutil.disk_usage('/').total / (1024**3), 0)
@@ -1079,32 +1180,24 @@ def get_system_audit():
     except:
         battery_pct = "N/A"
 
-    # Estados de Seguridad (PowerShell)
-    fw_active = "False" not in run_cmd('powershell -Command "Get-NetFirewallProfile | Select-Object -ExpandProperty Enabled"')
-    av_active = "True" in run_cmd('powershell -Command "Get-MpComputerStatus | Select-Object -ExpandProperty RealTimeProtectionEnabled"')
-    
-    # Licencia (WMIC es lo único lento, lo dejamos al final)
-    license_raw = run_cmd('wmic path SoftwareLicensingProduct where "Name like \'%Windows%\' and PartialProductKey is not null" get LicenseStatus')
-    license_active = "1" in license_raw
-
     inventory = {
-        "os": os_info,
-        "cpu": cpu_info,
+        "os": SYSTEM_CACHE["os_info"],
+        "cpu": SYSTEM_CACHE["cpu_info"],
         "ram_total": f"{ram_raw} GB",
         "disk_total": f"{disk_total_raw} GB",
         "battery": battery_pct,
-        "fw_active": fw_active,
-        "av_active": av_active,
-        "license_active": license_active,
+        "fw_active": SYSTEM_CACHE["fw_active"],
+        "av_active": SYSTEM_CACHE["av_active"],
+        "license_active": SYSTEM_CACHE["license_active"],
         "discovered_devices": get_discovered_devices()
     }
 
     alerts = []
-    if not fw_active: alerts.append({"level": "CRITICAL", "desc": "FIREWALL APAGADO"})
-    if not av_active: alerts.append({"level": "CRITICAL", "desc": "ANTIVIRUS APAGADO"})
+    if not SYSTEM_CACHE["fw_active"]: alerts.append({"level": "CRITICAL", "desc": "FIREWALL APAGADO"})
+    if not SYSTEM_CACHE["av_active"]: alerts.append({"level": "CRITICAL", "desc": "ANTIVIRUS APAGADO"})
     
     # Debug en consola para que el usuario vea qué se envía
-    print(f"📊 Audit: OS={os_info} | RAM={ram_raw}GB | BAT={battery_pct}")
+    print(f"📊 Audit: OS={SYSTEM_CACHE['os_info']} | RAM={ram_raw}GB | BAT={battery_pct}")
     
     return inventory, alerts
 
@@ -1390,25 +1483,12 @@ def agentless_probe_thread():
 
 def main():
     global agent_mutex
-    agent_mutex = check_single_instance()
+    # agent_mutex = check_single_instance()
     
     print(f"--- Sentinel Master Agent v9.0 ---")
     print(f"[+] Empresa a monitorear: {COMPANY_NAME}")
-    if not is_admin() and "--no-uac" not in sys.argv:
-        print("[*] Solicitando permisos de ADMINISTRADOR...")
-        try:
-            ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
-            sys.exit()
-        except Exception as e:
-            print(f"[-] No se pudo elevar privilegios: {e}. Continuando en modo usuario...")
     
-    # Auto instalar en inicio en segundo plano al ejecutar por primera vez
-    if is_admin():
-        check_and_install_persistence()
-        ensure_firewall_rules()
-        print("[+] Agente ejecutándose con privilegios de ADMINISTRADOR.")
-    else:
-        print("[+] Agente ejecutándose en modo USUARIO (sin persistencia).")
+    print("[+] Agente ejecutándose en modo USUARIO (sin persistencia).")
 
     # Iniciar hilo de sondeo agentless en segundo plano
     probe_thread = threading.Thread(target=agentless_probe_thread, daemon=True)
@@ -1417,6 +1497,8 @@ def main():
     while True:
         try:
             data = get_metrics()
+            import json
+            print("Sending data:", json.dumps(data, indent=2))
             res = requests.post(SERVER_URL, json=data, timeout=3)
             
             if res.status_code == 200:
@@ -1425,6 +1507,8 @@ def main():
                 if quarantine_requested:
                     print(f"📡 Status: QUARANTINE ACTIVE")
                 handle_quarantine(quarantine_requested)
+            else:
+                print(f"Server returned {res.status_code}: {res.text}")
                 
         except Exception as e:
             print(f"Error enviando métricas: {e}")
